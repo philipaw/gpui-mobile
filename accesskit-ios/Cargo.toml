@@ -1,0 +1,15 @@
+[package]
+name = "accesskit-ios"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.93"
+license = "Apache-2.0"
+description = "AccessKit ↔ UIAccessibility adapter for iOS (mirror of accesskit_macos)."
+
+# Stub-only at this commit: API surface declared, implementations are
+# `todo!()`. Subsequent commits land the dynamic UIView subclassing,
+# UIAccessibility selector handlers, and `update_if_active` body. See
+# DESIGN.md §10.4 Layer 3 in the gem repo.
+
+[dependencies]
+accesskit = "0.24"

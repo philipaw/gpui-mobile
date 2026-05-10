@@ -1,3 +1,9 @@
+# §10.4 Layer 3 scaffolding (philipaw/gpui-mobile fork): converted to a
+# lazy workspace so accesskit_ios can live as a sibling crate.
+# Upstream's single-crate layout is preserved; new crates are siblings.
+[workspace]
+members = [".", "accesskit-ios"]
+
 [package]
 name = "gpui-mobile"
 version = "0.1.0"
