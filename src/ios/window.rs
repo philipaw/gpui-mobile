@@ -10,6 +10,7 @@
 //! whose view hosts a CAMetalLayer. Rendering is performed by
 //! `gpui_wgpu::WgpuRenderer` which drives wgpu over the Metal backend.
 
+use super::a11y::{A11yState, IosActionHandler, SendSubclassingAdapter, WindowActivationHandler};
 use super::events::*;
 use super::IosDisplay;
 use crate::momentum::{MomentumScroller, VelocityTracker};
@@ -497,6 +498,16 @@ pub(crate) struct IosWindow {
     /// `request_frame` callback) can acquire a mutable reference without
     /// conflicting with the outer `&self` borrow.
     renderer: Mutex<Option<WgpuRenderer>>,
+    /// AccessKit ↔ UIAccessibility bridge. Dynamically subclasses the
+    /// Metal view at construction time so the iOS UIAccessibilityContainer
+    /// selectors route through the AccessKit tree we feed via
+    /// `update_if_active`. Mirror of `gpui_macos::MacWindowState::a11y_adapter`.
+    a11y_adapter: Arc<Mutex<SendSubclassingAdapter>>,
+    /// Per-frame shared state with the activation + action handlers
+    /// owned by `a11y_adapter`. Mirror of `gpui_macos::A11yState`.
+    /// Cloned by `take_accessibility_handler` for the writer closure
+    /// and by `debug_inject_a11y_action` for in-process tests.
+    a11y_state: Arc<Mutex<A11yState>>,
 }
 
 // Required for raw_window_handle
@@ -567,6 +578,30 @@ impl IosWindow {
             let pixel_w = (screen_bounds_cg.width * scale) as i32;
             let pixel_h = (screen_bounds_cg.height * scale) as i32;
 
+            // §10.4 Layer 3: spin up the accesskit_ios SubclassingAdapter
+            // on the Metal view. The adapter dynamically subclasses the
+            // UIView and intercepts the iOS UIAccessibilityContainer
+            // selectors (accessibilityElementCount,
+            // accessibilityElementAtIndex:, indexOfAccessibilityElement:)
+            // itself — we don't manually add those selectors to the Metal
+            // view class. The activation and action handlers close over a
+            // shared A11yState so we can write the initial TreeUpdate
+            // from gpui's drain even though the handlers are owned by the
+            // adapter at this point.
+            //
+            // unsafe fn — the view pointer must outlive the adapter,
+            // which holds because both live on IosWindow.
+            let a11y_state: Arc<Mutex<A11yState>> = Arc::new(Mutex::new(A11yState::default()));
+            let a11y_adapter = accesskit_ios::SubclassingAdapter::new(
+                view as *mut c_void,
+                WindowActivationHandler {
+                    state: a11y_state.clone(),
+                },
+                IosActionHandler {
+                    state: a11y_state.clone(),
+                },
+            );
+
             let _handle = handle; // consumed but not stored
             let ios_window = Self {
                 window,
@@ -593,6 +628,8 @@ impl IosWindow {
                 velocity_tracker: RefCell::new(VelocityTracker::new()),
                 momentum_scroller: RefCell::new(MomentumScroller::new()),
                 renderer: Mutex::new(None),
+                a11y_adapter: Arc::new(Mutex::new(SendSubclassingAdapter(a11y_adapter))),
+                a11y_state,
             };
 
             // Create the wgpu renderer using the Metal backend.
@@ -1335,6 +1372,29 @@ impl IosWindow {
             }
         }
     }
+
+    /// Test-injection hook for the a11y action pipeline. Mirror of
+    /// `gpui_macos::MacWindow::debug_inject_a11y_action`. Bypasses
+    /// UIKit and synthesizes an `accesskit::ActionRequest` directly
+    /// into a fresh `IosActionHandler`. The handler resolves the
+    /// `target_node` against the current `focus_inverse_map` and
+    /// (for `Action::Focus`) enqueues a `PendingA11yAction::Focus(fid)`
+    /// onto the same `pending_actions` queue a real OS-triggered
+    /// action would land on; the next gpui draw consumes it via
+    /// `take_pending_a11y_actions`.
+    ///
+    /// Layer 2 lesson carried forward from `gpui_macos`: this hook is
+    /// painful to retrofit, so add it from day one. Used by tests +
+    /// in-process validation harnesses.
+    #[cfg(debug_assertions)]
+    #[allow(dead_code)]
+    pub fn debug_inject_a11y_action(&self, request: accesskit::ActionRequest) {
+        use accesskit::ActionHandler as _;
+        let mut handler = IosActionHandler {
+            state: self.a11y_state.clone(),
+        };
+        handler.do_action(request);
+    }
 }
 
 impl HasWindowHandle for IosWindow {
@@ -1418,6 +1478,45 @@ impl PlatformWindow for IosWindow {
 
     fn take_input_handler(&mut self) -> Option<PlatformInputHandler> {
         self.input_handler.borrow_mut().take()
+    }
+
+    fn take_accessibility_handler(
+        &mut self,
+    ) -> Option<Box<dyn FnMut(gpui::accessibility::AccessibilityDrain) + Send + 'static>> {
+        // §10.4 Layer 3: closure feeds the SubclassingAdapter and stashes
+        // per-frame state for the activation + action handlers (which
+        // are owned by the adapter and can't be mutated externally).
+        //
+        // - `initial_update` only gets set on the FIRST drain. gpui's
+        //   first emission has `tree: Some(...)` plus a full nodes list,
+        //   which is what `accesskit_consumer::Tree::new` needs.
+        //   Subsequent emissions are diffs that would panic init.
+        // - `focus_inverse_map` is replaced every frame so the action
+        //   handler always sees the latest mapping.
+        let state = self.a11y_state.clone();
+        let adapter = self.a11y_adapter.clone();
+        Some(Box::new(move |drain: gpui::accessibility::AccessibilityDrain| {
+            let gpui::accessibility::AccessibilityDrain {
+                tree_update,
+                focus_inverse_map,
+            } = drain;
+            {
+                let mut a11y = state.lock();
+                if a11y.initial_update.is_none() {
+                    a11y.initial_update = Some(tree_update.clone());
+                }
+                a11y.focus_inverse_map = focus_inverse_map;
+            }
+            adapter.lock().update_if_active(|| tree_update);
+        }))
+    }
+
+    fn take_pending_a11y_actions(&mut self) -> Vec<gpui::accessibility::PendingA11yAction> {
+        // Drain whatever the IosActionHandler enqueued since the last
+        // gpui draw. The action handler runs on the UIKit main thread
+        // but without `&mut Window/&mut App`; this hook hands the
+        // pending list back to gpui core where those are available.
+        std::mem::take(&mut self.a11y_state.lock().pending_actions)
     }
 
     fn prompt(

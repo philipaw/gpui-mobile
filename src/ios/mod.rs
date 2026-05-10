@@ -7,6 +7,7 @@
 //! - Metal for GPU rendering
 //! - CoreFoundation for many utilities
 
+mod a11y;
 pub(crate) mod cg_types;
 mod dispatcher;
 mod display;
