@@ -3,7 +3,7 @@ use accesskit::{
     ActionHandler, ActionRequest, ActivationHandler, Node as NodeProvider, NodeId as LocalNodeId,
     Role, Tree as TreeData, TreeId, TreeUpdate,
 };
-use accesskit_consumer::{Node, Tree, TreeChangeHandler};
+use accesskit_consumer::{common_filter, Node, Tree, TreeChangeHandler};
 use std::ffi::c_void;
 use std::fmt::{Debug, Formatter};
 use std::rc::Rc;
@@ -218,6 +218,64 @@ impl Adapter {
         }
     }
 
+    /// Number of accessibility elements directly under the AccessKit
+    /// root, after the common AccessKit filter (excludes generic
+    /// containers, hidden nodes, etc.). Mirror of UIAccessibility's
+    /// `accessibilityElementCount` selector.
+    ///
+    /// Sub-commit 2c will wrap this with the `*mut NSObject`-returning
+    /// shim that UIKit invokes via the `UIAccessibilityContainer`
+    /// informal protocol.
+    pub fn accessibility_element_count<H: ActivationHandler + ?Sized>(
+        &mut self,
+        activation_handler: &mut H,
+    ) -> isize {
+        let context = self.get_or_init_context(activation_handler);
+        let tree = context.tree.borrow();
+        tree.state()
+            .root()
+            .filtered_children(common_filter)
+            .count() as isize
+    }
+
+    /// [`LocalNodeId`] of the nth filtered child of the root, or
+    /// `None` if `index` is negative or out of range. Sub-commit 2c
+    /// will wrap this with a `*mut NSObject` shim returning a
+    /// `PlatformNode` for `accessibilityElementAtIndex:`.
+    pub fn accessibility_element_at_index<H: ActivationHandler + ?Sized>(
+        &mut self,
+        index: isize,
+        activation_handler: &mut H,
+    ) -> Option<LocalNodeId> {
+        if index < 0 {
+            return None;
+        }
+        let context = self.get_or_init_context(activation_handler);
+        let tree = context.tree.borrow();
+        tree.state()
+            .root()
+            .filtered_children(common_filter)
+            .nth(index as usize)
+            .map(|n| n.locate().0)
+    }
+
+    /// Index of the supplied node among the root's filtered children,
+    /// or `None` if not present. Sub-commit 2c will translate `None`
+    /// into `NSNotFound` for `indexOfAccessibilityElement:`.
+    pub fn index_of_accessibility_element<H: ActivationHandler + ?Sized>(
+        &mut self,
+        node_id: LocalNodeId,
+        activation_handler: &mut H,
+    ) -> Option<isize> {
+        let context = self.get_or_init_context(activation_handler);
+        let tree = context.tree.borrow();
+        tree.state()
+            .root()
+            .filtered_children(common_filter)
+            .position(|n| n.locate().0 == node_id)
+            .map(|i| i as isize)
+    }
+
     #[doc(hidden)]
     pub fn debug_is_active(&self) -> bool {
         matches!(self.state, State::Active { .. })
@@ -268,6 +326,28 @@ mod tests {
             tree: Some(TreeData::new(root)),
             tree_id: TreeId::ROOT,
             focus,
+        }
+    }
+
+    /// Root with `n` button children. Children are LocalNodeId(2..2+n).
+    fn tree_with_button_children(n: usize) -> TreeUpdate {
+        let root_id = LocalNodeId(1);
+        let mut root = NodeProvider::new(Role::Window);
+        let child_ids: Vec<LocalNodeId> = (0..n).map(|i| LocalNodeId(2 + i as u64)).collect();
+        root.set_children(child_ids.clone());
+
+        let mut nodes = vec![(root_id, root)];
+        for id in &child_ids {
+            let mut btn = NodeProvider::new(Role::Button);
+            btn.set_label(format!("Button {}", id.0));
+            nodes.push((*id, btn));
+        }
+
+        TreeUpdate {
+            nodes,
+            tree: Some(TreeData::new(root_id)),
+            tree_id: TreeId::ROOT,
+            focus: root_id,
         }
     }
 
@@ -335,6 +415,108 @@ mod tests {
 
         adapter.update_if_active(|| full_tree(LocalNodeId(1)));
         assert!(adapter.debug_is_active());
+    }
+
+    #[test]
+    fn element_count_matches_filtered_children() {
+        let mut adapter = make_adapter();
+        let mut activation = CountingActivation {
+            update: Some(tree_with_button_children(3)),
+            calls: 0,
+        };
+        assert_eq!(adapter.accessibility_element_count(&mut activation), 3);
+    }
+
+    #[test]
+    fn element_count_returns_zero_for_empty_root() {
+        let mut adapter = make_adapter();
+        let mut activation = CountingActivation {
+            update: Some(tree_with_button_children(0)),
+            calls: 0,
+        };
+        assert_eq!(adapter.accessibility_element_count(&mut activation), 0);
+    }
+
+    #[test]
+    fn element_at_index_returns_nth_child_id() {
+        let mut adapter = make_adapter();
+        let mut activation = CountingActivation {
+            update: Some(tree_with_button_children(3)),
+            calls: 0,
+        };
+        // Force activation, then query without re-firing the handler.
+        adapter.ensure_initialized(&mut activation);
+
+        assert_eq!(
+            adapter.accessibility_element_at_index(0, &mut activation),
+            Some(LocalNodeId(2)),
+        );
+        assert_eq!(
+            adapter.accessibility_element_at_index(1, &mut activation),
+            Some(LocalNodeId(3)),
+        );
+        assert_eq!(
+            adapter.accessibility_element_at_index(2, &mut activation),
+            Some(LocalNodeId(4)),
+        );
+    }
+
+    #[test]
+    fn element_at_index_returns_none_out_of_range() {
+        let mut adapter = make_adapter();
+        let mut activation = CountingActivation {
+            update: Some(tree_with_button_children(2)),
+            calls: 0,
+        };
+        adapter.ensure_initialized(&mut activation);
+
+        assert_eq!(
+            adapter.accessibility_element_at_index(2, &mut activation),
+            None,
+        );
+        assert_eq!(
+            adapter.accessibility_element_at_index(-1, &mut activation),
+            None,
+        );
+    }
+
+    #[test]
+    fn index_of_element_roundtrips_with_at_index() {
+        let mut adapter = make_adapter();
+        let mut activation = CountingActivation {
+            update: Some(tree_with_button_children(3)),
+            calls: 0,
+        };
+        adapter.ensure_initialized(&mut activation);
+
+        assert_eq!(
+            adapter.index_of_accessibility_element(LocalNodeId(2), &mut activation),
+            Some(0),
+        );
+        assert_eq!(
+            adapter.index_of_accessibility_element(LocalNodeId(4), &mut activation),
+            Some(2),
+        );
+    }
+
+    #[test]
+    fn index_of_unknown_element_returns_none() {
+        let mut adapter = make_adapter();
+        let mut activation = CountingActivation {
+            update: Some(tree_with_button_children(2)),
+            calls: 0,
+        };
+        adapter.ensure_initialized(&mut activation);
+
+        assert_eq!(
+            adapter.index_of_accessibility_element(LocalNodeId(999), &mut activation),
+            None,
+        );
+        // The synthetic root is not itself a filtered child.
+        assert_eq!(
+            adapter.index_of_accessibility_element(LocalNodeId(1), &mut activation),
+            None,
+        );
     }
 
     #[test]
