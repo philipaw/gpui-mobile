@@ -13,3 +13,4 @@ description = "AccessKit ↔ UIAccessibility adapter for iOS (mirror of accesski
 
 [dependencies]
 accesskit = "0.24"
+accesskit_consumer = "0.35"

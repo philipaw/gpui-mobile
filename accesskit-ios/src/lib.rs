@@ -16,6 +16,10 @@
 //! plan and design decisions carried forward from the macOS adapter
 //! (Layer 2).
 
+mod adapter;
+mod context;
+
+pub use adapter::Adapter;
 pub use accesskit::{
     ActionHandler, ActionRequest, ActivationHandler, NodeId, Tree, TreeUpdate,
 };
