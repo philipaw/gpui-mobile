@@ -18,6 +18,8 @@
 
 mod adapter;
 mod context;
+#[cfg(target_os = "ios")]
+mod platform_node;
 
 pub use adapter::Adapter;
 pub use accesskit::{

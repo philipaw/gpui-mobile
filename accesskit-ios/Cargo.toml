@@ -14,3 +14,27 @@ description = "AccessKit ↔ UIAccessibility adapter for iOS (mirror of accesski
 [dependencies]
 accesskit = "0.24"
 accesskit_consumer = "0.35"
+hashbrown = { version = "0.16", features = ["default-hasher"] }
+
+# UIKit linkage is iOS-only. Versions track accesskit_macos 0.26's
+# objc2 line (objc2 0.5 / objc2-foundation 0.2) so the two adapter
+# crates stay parallel and easy to maintain in tandem. objc2-uikit
+# 0.2 is the parallel of objc2-app-kit 0.2.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = [
+    "NSArray",
+    "NSGeometry",
+    "NSObject",
+    "NSString",
+    "NSThread",
+    "NSValue",
+] }
+objc2-ui-kit = { version = "0.2", features = [
+    "UIAccessibility",
+    "UIAccessibilityConstants",
+    "UIAccessibilityContainer",
+    "UIAccessibilityElement",
+    "UIResponder",
+    "UIView",
+] }

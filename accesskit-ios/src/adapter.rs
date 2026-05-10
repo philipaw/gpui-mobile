@@ -115,7 +115,7 @@ impl Adapter {
                 ..
             } => {
                 let tree = Tree::new(update_factory(), *is_view_focused);
-                let context = Context::new(tree, Rc::clone(action_handler));
+                let context = Context::new(*view, tree, Rc::clone(action_handler));
                 self.state = State::Active {
                     view: *view,
                     context,
@@ -180,7 +180,7 @@ impl Adapter {
             } => match activation_handler.request_initial_tree() {
                 Some(initial_state) => {
                     let tree = Tree::new(initial_state, *is_view_focused);
-                    let context = Context::new(tree, Rc::clone(action_handler));
+                    let context = Context::new(*view, tree, Rc::clone(action_handler));
                     let result = Rc::clone(&context);
                     self.state = State::Active {
                         view: *view,
@@ -197,6 +197,7 @@ impl Adapter {
                     };
                     let placeholder_tree = Tree::new(placeholder_update, false);
                     let placeholder_context = Context::new(
+                        *view,
                         placeholder_tree,
                         Rc::new(ActionHandlerWrapper::new(PlaceholderActionHandler {})),
                     );
@@ -274,6 +275,87 @@ impl Adapter {
             .filtered_children(common_filter)
             .position(|n| n.locate().0 == node_id)
             .map(|i| i as isize)
+    }
+
+    /// `*mut NSObject` shim for `accessibility_element_count`. Mirror
+    /// of the typed [`Self::accessibility_element_count`] for callers
+    /// implementing the iOS UIAccessibilityContainer informal protocol;
+    /// the typed variant exists so unit tests can exercise the same
+    /// tree-walking logic without UIKit linkage.
+    #[cfg(target_os = "ios")]
+    pub fn accessibility_element_count_objc<H: ActivationHandler + ?Sized>(
+        &mut self,
+        activation_handler: &mut H,
+    ) -> isize {
+        self.accessibility_element_count(activation_handler)
+    }
+
+    /// `*mut NSObject` shim for `accessibility_element_at_index`.
+    /// Returns an autoreleased `PlatformNode` pointer (a
+    /// `UIAccessibilityElement` subclass) for the AT to consume.
+    /// Returns null on out-of-range indices.
+    #[cfg(target_os = "ios")]
+    pub fn accessibility_element_at_index_objc<H: ActivationHandler + ?Sized>(
+        &mut self,
+        index: isize,
+        activation_handler: &mut H,
+    ) -> *mut objc2_foundation::NSObject {
+        if index < 0 {
+            return std::ptr::null_mut();
+        }
+        let context = self.get_or_init_context(activation_handler);
+        let node_id = {
+            let tree = context.tree.borrow();
+            match tree
+                .state()
+                .root()
+                .filtered_children(common_filter)
+                .nth(index as usize)
+            {
+                Some(node) => node.id(),
+                None => return std::ptr::null_mut(),
+            }
+        };
+        let platform_node = context.get_or_create_platform_node(node_id);
+        objc2::rc::Id::autorelease_return(platform_node) as *mut _
+    }
+
+    /// `*mut NSObject` shim for `index_of_accessibility_element`.
+    /// Translates the AT-supplied pointer to a known `PlatformNode`
+    /// in the cache, then locates its position among the root's
+    /// filtered children. Returns -1 (NSNotFound's pattern) if the
+    /// element is not one we issued.
+    #[cfg(target_os = "ios")]
+    pub fn index_of_accessibility_element_objc<H: ActivationHandler + ?Sized>(
+        &mut self,
+        element: *mut objc2_foundation::NSObject,
+        activation_handler: &mut H,
+    ) -> isize {
+        if element.is_null() {
+            return -1;
+        }
+        let context = self.get_or_init_context(activation_handler);
+        let cached_id = {
+            let nodes = context.platform_nodes.borrow();
+            nodes
+                .iter()
+                .find(|(_, platform_node)| {
+                    objc2::rc::Id::as_ptr(*platform_node) as *mut objc2_foundation::NSObject
+                        == element
+                })
+                .map(|(id, _)| *id)
+        };
+        let cached_id = match cached_id {
+            Some(id) => id,
+            None => return -1,
+        };
+        let tree = context.tree.borrow();
+        tree.state()
+            .root()
+            .filtered_children(common_filter)
+            .position(|n| n.id() == cached_id)
+            .map(|i| i as isize)
+            .unwrap_or(-1)
     }
 
     #[doc(hidden)]
