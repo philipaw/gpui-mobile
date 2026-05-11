@@ -8,7 +8,7 @@ full landed set on top and the remaining work near the bottom.
 `~/.cargo/registry/src/.../accesskit_macos-0.26.0/src/`. Files
 referenced below are within that path.
 
-## Status (2026-05-10) — Layer 3 done end-to-end
+## Status (2026-05-11) — Layer 3 done end-to-end + hygiene pass landed
 
 **Done:** scaffold (1) + state machine (2a) + query helpers (2b) +
 PlatformNode + objc deps (2c) + SubclassingAdapter (3) + gpui-mobile
@@ -42,35 +42,43 @@ End-to-end coverage on real iOS Simulator across two spikes:
   Accessibility Inspector targeting the booted sim walks into the
   app's tree and sees the projected LabeledButton.
 
-**Carried-forward open items** (not blockers for §10.4 Layer 3 itself
-but desirable cleanups):
+**Layer 3 hygiene pass done (2026-05-11)** — all four
+carried-forward items addressed:
 
-- **Sub-commit 6 prereq #2 (App-lifetime fix)**: gpui-mobile's
-  `Application::run` on iOS consumes `Application` by value and
-  returns immediately, dropping the gpui App. Worked around in
-  sub-commit 6 by leaking the long-lived fields from
-  `IosWindow::Drop` (UIWindow Retained + a11y_adapter Arc +
-  a11y_state Arc), but the right fix is a gpui-side
-  `Application::run_until(&mut self, ...)` companion. See
-  "Sub-commit 6 prereq #2" below.
-- **gpui-mobile `gpui_ios_request_frame` re-entrancy** —
-  CADisplayLink-driven renderer panics on first frame
-  (`RefCell already borrowed`). Worked around by NOT installing
-  the display link in `spikes/gpui-ios-a11y-preview/ios/main.m`
-  (Sub-commit 6 doesn't need rendering — UIAccessibility selectors
-  route through the SubclassingAdapter independently of draw). The
-  app-running-blank screen is a symptom of this; not an a11y issue.
-- **`PlatformNode::accessibilityFrame` returns ZERO** because
-  `LabeledButton::accessibility()` doesn't call `node.set_bounds()`.
-  VoiceOver's focus rect would be 0×0 at origin. Real bounds need
-  to flow from gpui's `prepaint` bounds. Quick fix when needed.
-- **`view_controller`, `view`, `text_input_view`** in IosWindow
-  remain raw pointers (only `window` was upgraded to
-  `Retained<AnyObject>`). They're transitively held by the
-  setRootViewController → setView → addSubview retain chain, so
-  the single retain on `window` suffices for correctness, but
-  modernizing all four to `Retained` is hygiene that future
-  cleanup sweeps should do.
+- **Sub-commit 6 prereq #2 (App-lifetime fix)** — DONE. gpui-side
+  `Application::run_until(&mut self, ...)` added in
+  `philipaw/zed @ bb5281fa7d`; gpui-mobile's `run_app` switched to
+  use it + `mem::forget(app)` in `f5d7178`. IosWindow now outlives
+  gpui's launch callback.
+- **gpui-mobile `gpui_ios_request_frame` re-entrancy** — DONE via
+  `try_borrow_mut` (skip the frame on contention) plus
+  `ffi_panic_guard` wrapping the whole body (catch_unwind absorbs
+  any panic inside cb). Renderer re-enabled in
+  `spikes/gpui-ios-a11y-preview` (`cd3fd89`).
+- **`LabeledButton::accessibility()` bounds** — DONE
+  (`5839d73`). Both `spikes/gpui-mac-preview` and
+  `spikes/gpui-ios-a11y-preview` LabeledButton call
+  `node.set_bounds(...)` from the prepaint bounds via
+  `Pixels::to_f64()`. VoiceOver focus rect is no longer 0×0.
+- **`view_controller`, `view`, `text_input_view`** raw pointer
+  modernization — PARTIAL (`523b8a1`). Each got an explicit
+  `[obj retain]` in `IosWindow::new` for belt-and-suspenders
+  against iOS 13+ orphan-window teardown. Full type change to
+  `Retained<UIResponder>` etc. would require adding objc2-ui-kit
+  feature deps to gpui-mobile (currently uses only the bare
+  objc2 runtime); the explicit retain does the same work without
+  that. Defer typed-binding modernization until there's a
+  separate reason to bring objc2-ui-kit into gpui-mobile.
+
+Plus four "make future work easier" cleanups:
+
+- **A: justfile dedup** — DONE (`92139ad`). Single `_sim-udid`
+  helper boots iPhone 17 sim; three iOS sim recipes reference it.
+- **B: catch_unwind FFI wrappers** — DONE (`523b8a1`).
+  `ffi_panic_guard` helper applied to all 7 `gpui_ios_*` FFI
+  entries. Rust panics no longer abort the iOS process.
+- **C: `just sim-status` / `just sim-kill`** — DONE (`92139ad`).
+- **D: stale spike comment** — DONE (`92139ad`).
 
 All accesskit-ios crate sub-commits live on
 `philipaw/gpui-mobile` branch `gem/accesskit-ios-scaffold`. Gem-side
@@ -391,7 +399,25 @@ rooted at `window`, so the single retain-via-Retained on `window`
 keeps them alive. Modernizing those to `Retained` too is a future
 cleanup, not a correctness blocker.
 
-## Sub-commit 6 prereq #2 — gpui-mobile's `Application::run` drops the App on iOS
+## Sub-commit 6 prereq #2 — gpui-mobile's `Application::run` drops the App on iOS (DONE, gpui-mobile `f5d7178`)
+
+**Resolved by adding `Application::run_until(&mut self, ...)` to gpui
+core** (philipaw/zed `bb5281fa7d`) and switching gpui-mobile's
+`run_app` to use it + `mem::forget(app)`. Application's Rc<AppCell>
+now outlives the iOS process, keeping all Windows / IosWindows /
+the UIKit tree alive. Renderer can re-enable; lifecycle FFI can
+forward; AT walks live memory.
+
+The original analysis below documents what the problem was. The
+fix landed via:
+- philipaw/zed bb5281fa7d: gpui adds `pub fn run_until(&mut self,
+  on_finish_launching: F)` — identical body to `run`, only the
+  self-by-mut-ref vs self-by-value signature differs.
+- gpui-mobile f5d7178: `run_app` constructs Application as `let
+  mut app`, calls `app.run_until(...)`, finishes with
+  `std::mem::forget(app)`.
+
+### Original problem statement (kept for reference)
 
 **Blocks programmatic verification of sub-commit 6** (a
 dispatch_after block in main.m that queries
@@ -442,11 +468,12 @@ run_until(&mut self, ...)` companion to `run` that doesn't drop
 self would unblock both this case and any other long-running iOS
 embedding. Until then, sub-commit 6 stays manual-only.
 
-Validation when (a) lands: remove the comment block in
-`spikes/gpui-ios-a11y-preview/ios/main.m` that documents the
-revert, restore the `dispatch_after` block + the
-`gpui_ios_get_uikit_window` FFI on the gpui-mobile side, expect
-the verify block to print `[a11y verify] PASS` and `exit(0)`.
+Validation done in commit `cd3fd89`: removed the "renderer
+disabled" comment block from
+`spikes/gpui-ios-a11y-preview/ios/main.m`; CADisplayLink + all
+five lifecycle FFI hooks restored. App stays alive past gpui's
+launch callback. Accessibility Inspector still sees the projected
+LabeledButton tree on the booted sim.
 
 ## Cost recap
 
