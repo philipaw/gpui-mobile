@@ -523,6 +523,40 @@ pub(crate) struct IosWindow {
 unsafe impl Send for IosWindow {}
 unsafe impl Sync for IosWindow {}
 
+impl Drop for IosWindow {
+    fn drop(&mut self) {
+        // §10.4 Layer 3 sub-commit 6 prereq #2 workaround: gpui's
+        // `Application::run` on iOS consumes `Application` by value
+        // and returns immediately (the IosPlatform impl just stashes
+        // the launch callback for the FFI to invoke). When `run`
+        // returns, the gpui App drops, cascading down through
+        // Window → Box<dyn PlatformWindow> → IosWindow → here, which
+        // would ordinarily release the UIWindow's `Retained` and run
+        // SubclassingAdapter's Drop (reverting the UIView class
+        // swap). With the live UIWindow gone, UIKit shows a blank
+        // screen and Accessibility Inspector / VoiceOver see no
+        // a11y tree.
+        //
+        // Workaround: bump the refcount on each long-lived field so
+        // the inner resources leak instead of dying with us. The
+        // UIWindow stays alive (one extra `Retained` clone leaked),
+        // the SubclassingAdapter stays alive (one extra Arc clone
+        // leaked — its inner Drop, which reverts the class swap,
+        // never runs), and the A11yState stays alive (so the
+        // activation handler owned by the adapter still has a
+        // backing store).
+        //
+        // Real fix is gpui-side: a `pub fn Application::run_until(
+        // &mut self, ...)` companion to `run` that doesn't consume
+        // self, so iOS embedders can hold the App past the run
+        // callback. See accesskit-ios/TODO.md sub-commit 6 prereq #2
+        // for the full sketch and the four-option weighing.
+        std::mem::forget(self.window.clone());
+        std::mem::forget(self.a11y_adapter.clone());
+        std::mem::forget(self.a11y_state.clone());
+    }
+}
+
 impl IosWindow {
     pub fn new(handle: AnyWindowHandle, _params: WindowParams) -> anyhow::Result<Self> {
         // Create the window on the main screen

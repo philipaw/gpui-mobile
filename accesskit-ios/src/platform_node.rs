@@ -19,6 +19,7 @@
 use crate::context::Context;
 use accesskit::{Action, ActionRequest, Role};
 use accesskit_consumer::{common_filter, Node, NodeId, Tree};
+use objc2::runtime::AnyObject;
 use objc2::{
     declare_class, msg_send_id, mutability::MainThreadOnly, rc::Id, ClassType, DeclaredClass,
 };
@@ -107,10 +108,34 @@ declare_class!(
 
 impl PlatformNode {
     pub(crate) fn new(context: Weak<Context>, node_id: NodeId, mtm: MainThreadMarker) -> Id<Self> {
+        // iOS 26 rejects bare `[super init]` on UIAccessibilityElement
+        // with `NSInvalidArgumentException: Use initWithAccessibilityContainer:`.
+        // Resolve the host UIView from the context (kept alive by the
+        // window → vc → view retain chain rooted at IosWindow.window's
+        // Retained) BEFORE alloc — once `set_ivars` returns a
+        // `PartialInit`, `ivars()` isn't accessible until init returns.
+        let container = context.upgrade().and_then(|ctx| ctx.view.load());
+        let container_ptr = container
+            .as_ref()
+            .map(|view| Id::as_ptr(view) as *mut AnyObject)
+            .unwrap_or(std::ptr::null_mut());
+
         let this = mtm
             .alloc::<Self>()
             .set_ivars(PlatformNodeIvars { context, node_id });
-        unsafe { msg_send_id![super(this), init] }
+
+        unsafe {
+            if container_ptr.is_null() {
+                // Context is gone (e.g. adapter outlived its host) — fall
+                // back to bare init. iOS 26+ raises an exception here
+                // too, so this path is essentially "AT will crash" but
+                // we can't do better without a container.
+                msg_send_id![super(this), init]
+            } else {
+                let container_ref: &AnyObject = &*container_ptr;
+                msg_send_id![super(this), initWithAccessibilityContainer: container_ref]
+            }
+        }
     }
 
     fn resolve_with_context<F, T>(&self, f: F) -> Option<T>
