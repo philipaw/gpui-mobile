@@ -14,18 +14,31 @@ referenced below are within that path.
 PlatformNode + objc deps (2c) + SubclassingAdapter (3) + gpui-mobile
 IosWindow integration (4) + headless end-to-end on iOS Simulator (5,
 Path A) + full app bundle + gpui pipeline end-to-end on iOS Simulator
-(5b, Path B).
+(5b, Path B) + gpui-mobile IosWindow.window UAF fix (6 prereq #1) +
+sub-commit 6 manual-verification recipe (6 doc-only).
 
-**Remaining:** sub-commit 6 (VoiceOver-on-Simulator validation),
-**blocked on a gpui-mobile lifecycle UAF** discovered while bringing
-up 5b. The metal view stored at `IosWindow.view: *mut AnyObject` is
-not retained by the IosWindow; once the surrounding autorelease pool
-drains, the view deallocates and `handle_layout_change` segfaults
-trying to send `bounds` to a dangling pointer. 5b currently
-`std::process::exit(0)`s after the first TreeUpdate emission to
-avoid the crash; sub-commit 6 needs the app to **stay alive** so
-VoiceOver can focus + activate elements, which means the UAF has to
-be fixed first. See "Sub-commit 6 prereq" below.
+The whole §10.4 Layer 3 stack is structurally complete. End-to-end
+coverage on real iOS Simulator across two spikes:
+- `spikes/gpui-ios-a11y-headless`: synthesized TreeUpdate →
+  SubclassingAdapter → PlatformNode → UIAccessibility selector
+  round-trip, including `accessibilityActivate` firing
+  `Action::Click`.
+- `spikes/gpui-ios-a11y-preview`: full app via UIApplicationMain →
+  GpuiAppDelegate → gpui-mobile FFI → IosWindow → SubclassingAdapter,
+  with the gpui element pipeline emitting per-frame TreeUpdates
+  through `IosWindow::take_accessibility_handler`'s closure.
+
+**Remaining:** sub-commit 6 prereq #2 — fix gpui-mobile's
+`Application::run` lifecycle on iOS so the gpui::App doesn't drop
+when `run` returns. Today it does, which (a) means the spike's
+UIWindow tree is "snapshot-displayed" by UIKit but actually
+deallocated underneath, and (b) blocks programmatic verification of
+sub-commit 6 (a `dispatch_after`-based block in main.m that queries
+UIAccessibility selectors after a settle delay segfaults inside
+`objc_retain` on the freed UIWindow). Doesn't block VoiceOver
+itself — VoiceOver runs in another process and queries the app
+while it's still alive. See "Sub-commit 6 prereq #2" below for
+the fix sketch.
 
 All accesskit-ios crate sub-commits live on
 `philipaw/gpui-mobile` branch `gem/accesskit-ios-scaffold`. Gem-side
@@ -268,98 +281,156 @@ Reverted before commit.
   `SubclassingAdapter::update_if_active` (the `exit(0)` runs from
   inside that same closure).
 
-## Sub-commit 6 — VoiceOver-on-Simulator validation (TODO, blocked)
+## Sub-commit 6 — VoiceOver-on-Simulator validation (manual-only this commit)
 
-**Blocked on the gpui-mobile UAF in `IosWindow.view`.** The 5b
-spike currently `exit(0)`s after the first a11y emission to dodge
-the crash; sub-commit 6 needs the app to **stay alive** so VoiceOver
-can focus + activate elements. See "Sub-commit 6 prereq" below for
-the fix scope.
+The spike now stays alive after the UAF fix (gpui-mobile @ `31e3c16`),
+so VoiceOver can interact with it. Sub-commit 6 ships as
+**documentation** — a manual verification recipe — because
+programmatic verification (a dispatch_after block in main.m that
+queries UIAccessibility selectors against the gpui UIWindow) hits
+a separate gpui-mobile lifecycle issue described under "Sub-commit
+6 programmatic-verification prereq" below.
 
-Once the app stays alive past the first layout pass:
-- `xcrun simctl ui booted accessibility_screen_navigation_enabled YES`
-  (or use the Simulator's Settings → Accessibility → VoiceOver toggle)
-  to enable VoiceOver in the booted simulator.
-- Relaunch the spike via `xcrun simctl launch`.
-- Observe VoiceOver announces the LabeledButton with the correct
-  role + label when focused.
-- Double-tap triggers `accessibilityActivate` (which fires our
-  `Action::Click` via `IosActionHandler` — same path sub-commit 5
-  already validated end-to-end at the headless layer).
+### Manual VoiceOver recipe
+
+```
+# 1. Build + boot + launch the spike (terminal A).
+just spike-gpui-ios-a11y-preview
+
+# 2. In the Simulator app, enable VoiceOver:
+#    Settings → Accessibility → VoiceOver → toggle ON.
+#    (Or, programmatically before launching:
+#       xcrun simctl spawn booted notifyutil -s \
+#         com.apple.UIKit.AccessibilityVoiceOverEnabled 1
+#     — note this varies by iOS version.)
+
+# 3. With VoiceOver on, swipe right inside the app's window to focus
+#    elements. Expect VoiceOver to announce: "hello a11y, button"
+#    (label + role from the LabeledButton element).
+
+# 4. Double-tap to fire the Click action. Expect the gpui-mobile
+#    IosActionHandler to log:
+#      [a11y] Action::Focus / Action::Click ... (enqueued)
+#    in the --console output, plus the next gpui draw to dispatch
+#    the queued PendingA11yAction.
+```
 
 Xcode's iOS Accessibility Inspector (Xcode → Open Developer Tool →
-Accessibility Inspector → switch target picker to Simulator) gives
-visual verification of the projected tree without needing VoiceOver
-gestures.
+Accessibility Inspector → switch target picker to the booted
+Simulator) gives visual verification of the projected tree without
+VoiceOver gestures — useful for tree-walking + focus-rect inspection.
 
-### Open question for 6 (independent of UAF fix)
+### Open question for 6 (independent of all prereqs)
 
 Sub-commit 5b's `LabeledButton` returns an AccessKit Node with no
 `set_bounds(...)` call. `PlatformNode::accessibilityFrame` returns
 ZERO. VoiceOver may not surface elements with zero rects (or may
 show them at the screen origin where they're hard to interact with).
-If, after the UAF is fixed, VoiceOver doesn't pick up the button,
+If VoiceOver doesn't pick up the button during the manual recipe,
 the next move is to teach `LabeledButton::accessibility()` to call
 `node.set_bounds(...)` from the prepaint bounds.
 `gpui-mac-preview` probably gets away with no bounds because macOS
 VoiceOver is more permissive.
 
-## Sub-commit 6 prereq — fix gpui-mobile's `IosWindow.view` UAF
+## Sub-commit 6 prereq #1 — fix gpui-mobile's `IosWindow.view` UAF (DONE, `31e3c16`)
 
-`IosWindow.view: *mut AnyObject` (window.rs:451) is set to the
-output of `[MetalViewClass alloc]; [view initWithFrame:...]` and
-stored as a raw pointer. The view has +1 retain count after init
-but the IosWindow doesn't take ownership (no `Id` wrap, no
-explicit `retain`). Once the surrounding autorelease pool drains,
-the view's retain count drops to 0 and it deallocates. Subsequent
-`viewDidLayoutSubviews` from UIKit fires
-`handle_layout_change`, which sends `bounds` to the now-dangling
-pointer and segfaults (Data Abort, "byte read Translation fault").
+`IosWindow.window: *mut AnyObject` was the leak's root: held with
+no extra retain past `[UIWindow alloc] initWithFrame:`'s +1, dropped
+when the surrounding autorelease pool drained, cascading down the
+`setRootViewController → setView → addSubview` chain to dangle the
+metal view (visible as a segfault in `handle_layout_change` —
+Data Abort, "byte read Translation fault" on a wild pointer).
 
-The defensive guards already in place help but don't cover this:
-- `if self.view.is_null() return` (window.rs:1319) — the pointer
-  is non-nil, just dangling. Doesn't fire.
-- `catch_unwind` around `handle_layout_change` in
-  `view_did_layout_subviews` (window.rs:103) — catches Rust panics,
-  not segfaults.
+Fixed in `philipaw/gpui-mobile @ 31e3c16` by changing the field
+type to `Retained<AnyObject>` and wrapping the raw init result via
+`Retained::from_raw`, which consumes the +1 from init and extends
+lifetime to match `IosWindow`'s. Two read sites adjusted
+(`activate` + `is_active`); both defensive guards (the `is_null`
+check + `catch_unwind`) added during diagnosis were removed in the
+same commit.
 
-**Fix sketch:** make `IosWindow.view` take ownership. Two viable
-shapes:
-- **(a) `view: objc2::rc::Id<UIView>`.** The objc2 `Id` type
-  manages retain/release. Replaces `*mut AnyObject` everywhere
-  `view` is read; needs `*const Id::as_ptr(&view) as *mut c_void`
-  for the FFI handoff to wgpu. ~30-50 lines of churn but
-  type-safe lifetime.
-- **(b) Explicit `retain` after init.** Add `let _: () =
-  msg_send![view, retain]` in `IosWindow::new` after the alloc/init
-  pair. Pair it with a `release` in `Drop`. Smaller diff
-  (~10 lines), but the lifetime is implicit / easy to break later.
+The other three pointer fields (`view_controller`, `view`,
+`text_input_view`) remain raw pointers — they're transitively held
+by the `setRootViewController → setView → addSubview` retain chain
+rooted at `window`, so the single retain-via-Retained on `window`
+keeps them alive. Modernizing those to `Retained` too is a future
+cleanup, not a correctness blocker.
 
-Same treatment likely needed for `text_input_view` and
-`view_controller` if they have the same pattern (verify before
-fixing — they may already be retained via parent-view attach).
+## Sub-commit 6 prereq #2 — gpui-mobile's `Application::run` drops the App on iOS
 
-Validation: after the fix, remove `std::process::exit(0)` from
-`spikes/gpui-ios-a11y-preview/src/lib.rs` and confirm the app
-stays running. Also remove the `is_null` + `catch_unwind` guards
-from gpui-mobile's `window.rs` — they're documented workarounds
-for this bug, not real fixes.
+**Blocks programmatic verification of sub-commit 6** (a
+dispatch_after block in main.m that queries
+`[uiwindow.rootViewController.view accessibilityElementCount]` etc.
+against the live tree). Doesn't block VoiceOver itself — VoiceOver
+runs in another process and queries the app while it's still alive
+in the foreground.
+
+`gpui::Application::run(self, callback)` consumes `Application` by
+value. On iOS, `IosPlatform::run` only stashes the callback for the
+FFI to invoke later — `run` returns immediately. The Application
+then drops, taking down the Rc<AppCell>, the App state, all
+Windows, all PlatformWindows, all IosWindows, and all retained
+UIWindows with it. From that point onward the iOS app is showing
+a snapshot of a deallocated UIWindow tree.
+
+Symptom when programmatic verification runs: `dispatch_after` block
+fires 1s after launch, calls `gpui_ios_get_uikit_window` (returns a
+plausible-looking pointer because `IOS_WINDOW_LIST` still holds
+`*const IosWindow` to freed memory whose first 8 bytes happen to
+look like a UIWindow*), then sends `[win class]` to it, ARC inserts
+`objc_retain(win)`, segfaults inside `objc_retain` reading the
+deallocated UIWindow's class header.
+
+**Fix sketch:** keep the `gpui::App` alive past
+`Application::run`'s return. Options:
+
+- **(a) Modify gpui core** to make `Application::run` take
+  `&mut self` instead of `self`, so the caller can hold the
+  Application and not drop it. Heavy — public API change in gpui.
+- **(b) Stash a strong reference to the App's `Rc<AppCell>`** from
+  inside the `cx.open_window` callback into a `static` slot.
+  Requires gpui to expose `App::clone_app_cell()` or similar (a
+  way to leak a strong Rc). Not currently exposed.
+- **(c) Box::leak in gpui-mobile's `run_app`** —
+  `run_app` could wrap the `Application` in a `Box`, leak it before
+  `.run(...)`, and pass the leaked reference's `App` instance to
+  the callback. Doesn't require public API changes but requires
+  Application to expose a `.run(&mut self, ...)` shape. Today
+  `run` is `fn run(self, ...)` — same blocker as (a).
+- **(d) `mem::forget(application)` after run returns** — but `run`
+  consumes `self`, so `application` is gone by then. We'd need to
+  `mem::forget` from inside `run` itself (impossible without
+  modifying gpui).
+
+(a) is the right long-term fix; on the gpui side a `pub fn
+run_until(&mut self, ...)` companion to `run` that doesn't drop
+self would unblock both this case and any other long-running iOS
+embedding. Until then, sub-commit 6 stays manual-only.
+
+Validation when (a) lands: remove the comment block in
+`spikes/gpui-ios-a11y-preview/ios/main.m` that documents the
+revert, restore the `dispatch_after` block + the
+`gpui_ios_get_uikit_window` FFI on the gpui-mobile side, expect
+the verify block to print `[a11y verify] PASS` and `exit(0)`.
 
 ## Cost recap
 
 Original §10.4 estimate: 6-8 sittings total for sub-commits 2-6.
 
-Done so far (6 sittings, denser than estimated):
+Done so far (7 sittings, denser than estimated):
 - 1 (scaffold) + 2a/b/c (Adapter + helpers + PlatformNode) +
   3 (SubclassingAdapter) + 4 (IosWindow integration) +
   5 (headless validation, Path A) +
-  5b (full app bundle + gpui pipeline, Path B).
+  5b (full app bundle + gpui pipeline, Path B) +
+  6 prereq #1 (gpui-mobile IosWindow.window UAF fix) +
+  6 manual-only (this commit, doc + recipe).
 
-Remaining (1.5-2 sittings estimated):
-- Sub-commit 6 prereq (gpui-mobile UAF fix on `IosWindow.view`) —
-  half-session, mostly Rust + a careful read of the surrounding
-  view-controller / wgpu hand-off code in gpui-mobile.
-- 6 (VoiceOver validation) — short session, gated on the prereq.
+Remaining (variable):
+- 6 prereq #2 (gpui-mobile App-lifetime fix so `Application::run`
+  doesn't drop the App on iOS) — full session of gpui-side API
+  design work + gpui-mobile FFI rewiring. Unblocks programmatic
+  6a verification.
+- VoiceOver manual recipe execution (short session, by hand).
 
 ## Lessons carried forward
 
