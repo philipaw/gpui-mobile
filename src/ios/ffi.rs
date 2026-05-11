@@ -14,8 +14,34 @@
 
 use gpui::{App, AppContext, Application, RequestFrameOptions, WindowOptions};
 use std::ffi::c_void;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::OnceLock;
+
+/// Absorb Rust panics inside an `extern "C"` FFI body so the process
+/// doesn't `abort()` on the unwind across the C boundary
+/// (`panic_cannot_unwind`). Logs the location + payload at error level
+/// when one fires; the FFI returns normally.
+///
+/// Wrap the body of every `pub extern "C" fn gpui_ios_*` entry point
+/// in this — gpui's render/touch/lifecycle code paths regularly
+/// encounter UIKit re-entrancy or RefCell contention that surfaces
+/// as a Rust panic mid-callback; without this guard, the simulator
+/// produces a macOS crash dialog and the app dies. See sub-commit 6
+/// prereq follow-ups in `accesskit-ios/TODO.md`.
+fn ffi_panic_guard(name: &'static str, body: impl FnOnce()) {
+    let result = catch_unwind(AssertUnwindSafe(body));
+    if let Err(payload) = result {
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        log::error!("GPUI iOS FFI panic absorbed in {name}: {msg}");
+    }
+}
 
 /// Global storage for the GPUI application state.
 /// This is set during initialization and used by FFI callbacks.
@@ -135,20 +161,21 @@ pub(crate) fn set_finish_launching_callback(callback: Box<dyn FnOnce()>) {
 /// This invokes the callback passed to Application::run().
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_did_finish_launching(_app_ptr: *mut c_void) {
-    log::info!("GPUI iOS: Did finish launching");
-
-    if let Some(state) = IOS_APP_STATE.get() {
-        // Safety: Only called from main thread
-        let callback = unsafe { (*state.finish_launching.get()).take() };
-        if let Some(callback) = callback {
-            log::info!("GPUI iOS: Invoking finish launching callback");
-            callback();
+    ffi_panic_guard("gpui_ios_did_finish_launching", || {
+        log::info!("GPUI iOS: Did finish launching");
+        if let Some(state) = IOS_APP_STATE.get() {
+            // Safety: Only called from main thread
+            let callback = unsafe { (*state.finish_launching.get()).take() };
+            if let Some(callback) = callback {
+                log::info!("GPUI iOS: Invoking finish launching callback");
+                callback();
+            } else {
+                log::warn!("GPUI iOS: No finish launching callback registered");
+            }
         } else {
-            log::warn!("GPUI iOS: No finish launching callback registered");
+            log::error!("GPUI iOS: Not initialized");
         }
-    } else {
-        log::error!("GPUI iOS: Not initialized");
-    }
+    });
 }
 
 /// Called when the iOS app will enter the foreground.
@@ -157,20 +184,10 @@ pub extern "C" fn gpui_ios_did_finish_launching(_app_ptr: *mut c_void) {
 /// This notifies all GPUI windows that the app is becoming active.
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_will_enter_foreground(_app_ptr: *mut c_void) {
-    log::info!("GPUI iOS: Will enter foreground");
-
-    // Notify all windows that they're becoming active
-    if let Some(wrapper) = IOS_WINDOW_LIST.get() {
-        unsafe {
-            let windows = &*wrapper.0.get();
-            for &window_ptr in windows.iter() {
-                if !window_ptr.is_null() {
-                    let window = &*window_ptr;
-                    window.notify_active_status_change(true);
-                }
-            }
-        }
-    }
+    ffi_panic_guard("gpui_ios_will_enter_foreground", || {
+        log::info!("GPUI iOS: Will enter foreground");
+        notify_all_windows(true);
+    });
 }
 
 /// Called when the iOS app did become active.
@@ -179,20 +196,10 @@ pub extern "C" fn gpui_ios_will_enter_foreground(_app_ptr: *mut c_void) {
 /// This indicates the app is now in the foreground and receiving events.
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_did_become_active(_app_ptr: *mut c_void) {
-    log::info!("GPUI iOS: Did become active");
-
-    // App is now fully active - windows should be notified
-    if let Some(wrapper) = IOS_WINDOW_LIST.get() {
-        unsafe {
-            let windows = &*wrapper.0.get();
-            for &window_ptr in windows.iter() {
-                if !window_ptr.is_null() {
-                    let window = &*window_ptr;
-                    window.notify_active_status_change(true);
-                }
-            }
-        }
-    }
+    ffi_panic_guard("gpui_ios_did_become_active", || {
+        log::info!("GPUI iOS: Did become active");
+        notify_all_windows(true);
+    });
 }
 
 /// Called when the iOS app will resign active.
@@ -201,20 +208,10 @@ pub extern "C" fn gpui_ios_did_become_active(_app_ptr: *mut c_void) {
 /// This indicates the app is about to become inactive (e.g., incoming call, switching apps).
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_will_resign_active(_app_ptr: *mut c_void) {
-    log::info!("GPUI iOS: Will resign active");
-
-    // App is about to become inactive
-    if let Some(wrapper) = IOS_WINDOW_LIST.get() {
-        unsafe {
-            let windows = &*wrapper.0.get();
-            for &window_ptr in windows.iter() {
-                if !window_ptr.is_null() {
-                    let window = &*window_ptr;
-                    window.notify_active_status_change(false);
-                }
-            }
-        }
-    }
+    ffi_panic_guard("gpui_ios_will_resign_active", || {
+        log::info!("GPUI iOS: Will resign active");
+        notify_all_windows(false);
+    });
 }
 
 /// Called when the iOS app did enter the background.
@@ -224,16 +221,23 @@ pub extern "C" fn gpui_ios_will_resign_active(_app_ptr: *mut c_void) {
 /// shared resources. The app will be suspended shortly after this returns.
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_did_enter_background(_app_ptr: *mut c_void) {
-    log::info!("GPUI iOS: Did enter background");
+    ffi_panic_guard("gpui_ios_did_enter_background", || {
+        log::info!("GPUI iOS: Did enter background");
+        notify_all_windows(false);
+    });
+}
 
-    // Notify windows they're no longer visible
+/// Walk `IOS_WINDOW_LIST` and call `notify_active_status_change` on each
+/// registered window. Shared between the four foreground/background
+/// lifecycle FFI entries.
+fn notify_all_windows(active: bool) {
     if let Some(wrapper) = IOS_WINDOW_LIST.get() {
         unsafe {
             let windows = &*wrapper.0.get();
             for &window_ptr in windows.iter() {
                 if !window_ptr.is_null() {
                     let window = &*window_ptr;
-                    window.notify_active_status_change(false);
+                    window.notify_active_status_change(active);
                 }
             }
         }
@@ -246,9 +250,10 @@ pub extern "C" fn gpui_ios_did_enter_background(_app_ptr: *mut c_void) {
 /// This is a good place to save any unsaved data.
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_will_terminate(_app_ptr: *mut c_void) {
-    log::info!("GPUI iOS: Will terminate");
-
-    // Quit callbacks would be invoked here if registered.
+    ffi_panic_guard("gpui_ios_will_terminate", || {
+        log::info!("GPUI iOS: Will terminate");
+        // Quit callbacks would be invoked here if registered.
+    });
 }
 
 /// Called when a touch event occurs.
@@ -282,6 +287,10 @@ pub extern "C" fn gpui_ios_handle_touch(
 /// The window_ptr should be the value returned by gpui_ios_get_window().
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_request_frame(window_ptr: *mut c_void) {
+    ffi_panic_guard("gpui_ios_request_frame", || request_frame_inner(window_ptr));
+}
+
+fn request_frame_inner(window_ptr: *mut c_void) {
     if window_ptr.is_null() {
         return;
     }
@@ -300,17 +309,36 @@ pub extern "C" fn gpui_ios_request_frame(window_ptr: *mut c_void) {
     // so drain_pending_text() runs and the UI updates.
     let text_dirty = crate::TEXT_INPUT_DIRTY.swap(false, std::sync::atomic::Ordering::AcqRel);
 
-    // Take the callback, invoke it, then restore it
-    // We must complete the borrow before invoking the callback,
-    // as the callback might try to borrow the same RefCell
-    let callback = window.request_frame_callback.borrow_mut().take();
+    // Take the callback, invoke it, then restore it.
+    //
+    // `try_borrow_mut` (instead of `borrow_mut`) makes both halves of
+    // the take/replace dance fault-tolerant against re-entrancy.
+    // Observed scenario: gpui's render-frame callback, mid-flight,
+    // ends up triggering another `CADisplayLink` dispatch (or any path
+    // back into `gpui_ios_request_frame`) before the original call
+    // returns — the second call's `borrow_mut` panics with
+    // "RefCell already borrowed", which can't unwind across this
+    // `extern "C"` boundary and aborts the process. With `try_borrow_mut`,
+    // we silently skip the re-entrant frame request; the original
+    // frame finishes normally and `CADisplayLink` will fire again on
+    // the next vsync.
+    let callback = match window.request_frame_callback.try_borrow_mut() {
+        Ok(mut guard) => guard.take(),
+        Err(_) => return,
+    };
     if let Some(mut cb) = callback {
         cb(RequestFrameOptions {
             force_render: text_dirty,
             ..Default::default()
         });
-        // Restore the callback for the next frame
-        window.request_frame_callback.borrow_mut().replace(cb);
+        // Restore the callback for the next frame. `try_borrow_mut`
+        // here too — if anything left a borrow open during cb (e.g.
+        // `Window::set_request_frame_handler` was called from within
+        // cb), we can't re-install; the next frame will just see no
+        // callback registered.
+        if let Ok(mut guard) = window.request_frame_callback.try_borrow_mut() {
+            *guard = Some(cb);
+        }
     }
 }
 

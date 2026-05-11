@@ -101,21 +101,40 @@ fn register_view_controller_class() -> &'static AnyClass {
 
         // Override viewDidLayoutSubviews — called by UIKit on rotation,
         // split-screen changes, and any other layout pass.
+        //
+        // catch_unwind around each handle_layout_change invocation
+        // absorbs Rust panics that would otherwise unwind across the
+        // extern "C" boundary as `panic_cannot_unwind` and abort the
+        // process. Two routine panic sources have been observed:
+        //
+        // 1. `IOS_WINDOW_LIST` holds raw pointers to IosWindow boxes;
+        //    if gpui's `Application::run` drops an IosWindow (which
+        //    it does on iOS as soon as `run` returns), the pointer
+        //    dangles and dereferencing it reads freed memory.
+        //    handle_layout_change then sends `bounds` to a `0xbead...`
+        //    sentinel and segfaults — actually a SIGSEGV not a panic,
+        //    so catch_unwind doesn't help there. (See sub-commit 6
+        //    prereq #2 in accesskit-ios/TODO.md for the real fix.)
+        // 2. handle_layout_change's renderer / resize-callback path
+        //    can panic mid-frame on RefCell contention or wgpu state
+        //    issues. catch_unwind absorbs these.
         extern "C" fn view_did_layout_subviews(this: *mut AnyObject, _sel: Sel) {
-            // Call super
             unsafe {
                 let superclass = class!(UIViewController);
                 let _: () = msg_send![super(this, superclass), viewDidLayoutSubviews];
             }
 
-            // Notify all registered GPUI windows about the layout change.
             if let Some(wrapper) = super::ffi::IOS_WINDOW_LIST.get() {
                 unsafe {
                     let windows = &*wrapper.0.get();
                     for &window_ptr in windows.iter() {
                         if !window_ptr.is_null() {
                             let window = &*window_ptr;
-                            window.handle_layout_change();
+                            let _ = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| {
+                                    window.handle_layout_change();
+                                }),
+                            );
                         }
                     }
                 }
@@ -651,6 +670,21 @@ impl IosWindow {
             // see the field's docstring for why this matters.
             let window = Retained::from_raw(window)
                 .expect("[UIWindow alloc] initWithFrame: returned null");
+
+            // Explicitly retain `view_controller`, `view`, and
+            // `text_input_view` so they don't dangle when the surrounding
+            // autorelease pool drains. The setRootViewController →
+            // setView → addSubview retain chain rooted at `window` is
+            // NOT sufficient on iOS 13+ — orphan UIWindows (not
+            // attached to a UIWindowScene) appear to have their VC /
+            // view chain torn down independently, leaving raw pointers
+            // pointing at freed memory ("byte read Translation fault"
+            // on `0xbead...` sentinels). Belt-and-suspenders retain
+            // at construction; the IosWindow::Drop impl pairs each
+            // with an objc_release on teardown.
+            let _: *mut AnyObject = msg_send![view_controller, retain];
+            let _: *mut AnyObject = msg_send![view, retain];
+            let _: *mut AnyObject = msg_send![text_input_view, retain];
 
             let _handle = handle; // consumed but not stored
             let ios_window = Self {
