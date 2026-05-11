@@ -23,6 +23,7 @@ use gpui::{
 };
 use gpui_wgpu::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig};
 use objc2::encode::{Encode, Encoding, RefEncode};
+use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{class, msg_send, sel};
 
@@ -108,25 +109,13 @@ fn register_view_controller_class() -> &'static AnyClass {
             }
 
             // Notify all registered GPUI windows about the layout change.
-            // catch_unwind: handle_layout_change can panic (RefCell borrow
-            // races, msg_send to half-initialized objc state on the first
-            // layout pass, etc.) — first observed in
-            // `spikes/gpui-ios-a11y-preview` (sub-commit 5b). Without
-            // this guard, the panic propagates across the extern "C"
-            // boundary as panic_cannot_unwind → abort(). Absorb here;
-            // a follow-up should fix the underlying handle_layout_change
-            // panic instead of catching it.
             if let Some(wrapper) = super::ffi::IOS_WINDOW_LIST.get() {
                 unsafe {
                     let windows = &*wrapper.0.get();
                     for &window_ptr in windows.iter() {
                         if !window_ptr.is_null() {
                             let window = &*window_ptr;
-                            let _ = std::panic::catch_unwind(
-                                std::panic::AssertUnwindSafe(|| {
-                                    window.handle_layout_change();
-                                }),
-                            );
+                            window.handle_layout_change();
                         }
                     }
                 }
@@ -456,8 +445,16 @@ enum TouchState {
 
 #[allow(clippy::type_complexity)]
 pub(crate) struct IosWindow {
-    /// The UIWindow object
-    window: *mut AnyObject,
+    /// The UIWindow object. Held as `Retained<AnyObject>` so the
+    /// window's +1 retain count from `[UIWindow alloc] initWithFrame:`
+    /// outlives the surrounding autorelease pool. Without this, the
+    /// window deallocates as soon as `IosWindow::new`'s autorelease
+    /// pool drains, which cascades down the
+    /// setRootViewController → setView → addSubview retain chain
+    /// and dangles `view_controller` / `view` / `text_input_view`
+    /// (visible as a segfault in `handle_layout_change` once
+    /// UIKit's first layout pass fires).
+    window: Retained<AnyObject>,
     /// The UIViewController
     view_controller: *mut AnyObject,
     /// The Metal-backed UIView
@@ -613,6 +610,13 @@ impl IosWindow {
                     state: a11y_state.clone(),
                 },
             );
+
+            // Take ownership of the UIWindow's +1 retain count from
+            // `[UIWindow alloc] initWithFrame:`. From this point on the
+            // window outlives `IosWindow::new`'s autorelease pool —
+            // see the field's docstring for why this matters.
+            let window = Retained::from_raw(window)
+                .expect("[UIWindow alloc] initWithFrame: returned null");
 
             let _handle = handle; // consumed but not stored
             let ios_window = Self {
@@ -1321,16 +1325,6 @@ impl IosWindow {
     /// Queries the current UIView bounds, updates the stored bounds/scale,
     /// reconfigures the Metal layer + wgpu surface, and fires the resize callback.
     pub fn handle_layout_change(&self) {
-        // Guard: viewDidLayoutSubviews on the GPUIViewController can fire
-        // before the spike's IosWindow has a fully-attached metal view —
-        // first observed in `spikes/gpui-ios-a11y-preview` (sub-commit 5b),
-        // where the app aborts on `messsaging bounds to nil` from
-        // applicationDidBecomeActive's first layout pass. Skip silently
-        // when the metal view pointer is null; subsequent layout passes
-        // (after the view is wired up) still process normally.
-        if self.view.is_null() {
-            return;
-        }
         unsafe {
             let view_bounds: ObjcCGRect = msg_send![self.view, bounds];
             let screen: *mut AnyObject = msg_send![class!(UIScreen), mainScreen];
@@ -1604,7 +1598,7 @@ impl PlatformWindow for IosWindow {
 
     fn activate(&self) {
         unsafe {
-            let _: () = msg_send![self.window, makeKeyAndVisible];
+            let _: () = msg_send![&*self.window, makeKeyAndVisible];
         }
     }
 
@@ -1612,7 +1606,7 @@ impl PlatformWindow for IosWindow {
         unsafe {
             let app: *mut AnyObject = msg_send![class!(UIApplication), sharedApplication];
             let key_window: *mut AnyObject = msg_send![app, keyWindow];
-            self.window == key_window
+            Retained::as_ptr(&self.window) as *mut AnyObject == key_window
         }
     }
 
