@@ -13,12 +13,19 @@ referenced below are within that path.
 **Done:** scaffold (1) + state machine (2a) + query helpers (2b) +
 PlatformNode + objc deps (2c) + SubclassingAdapter (3) + gpui-mobile
 IosWindow integration (4) + headless end-to-end on iOS Simulator (5,
-Path A).
+Path A) + full app bundle + gpui pipeline end-to-end on iOS Simulator
+(5b, Path B).
 
-**Remaining:** full app bundle + gpui pipeline (5b, Path B) + VoiceOver
-validation (6). 5b is the main lift left — most of the work is iOS
-app infrastructure (UIApplicationMain, AppDelegate, .app bundle, FFI
-bridge), not Rust.
+**Remaining:** sub-commit 6 (VoiceOver-on-Simulator validation),
+**blocked on a gpui-mobile lifecycle UAF** discovered while bringing
+up 5b. The metal view stored at `IosWindow.view: *mut AnyObject` is
+not retained by the IosWindow; once the surrounding autorelease pool
+drains, the view deallocates and `handle_layout_change` segfaults
+trying to send `bounds` to a dangling pointer. 5b currently
+`std::process::exit(0)`s after the first TreeUpdate emission to
+avoid the crash; sub-commit 6 needs the app to **stay alive** so
+VoiceOver can focus + activate elements, which means the UAF has to
+be fixed first. See "Sub-commit 6 prereq" below.
 
 All accesskit-ios crate sub-commits live on
 `philipaw/gpui-mobile` branch `gem/accesskit-ios-scaffold`. Gem-side
@@ -188,139 +195,175 @@ IosWindow constructed in the spike); that gpui's element pipeline
 actually emits TreeUpdates on iOS; VoiceOver behavior. Those are
 sub-commit 5b's job.
 
-## Sub-commit 5b — full iOS app bundle + gpui pipeline (TODO, Path B)
+## Sub-commit 5b — full iOS app bundle + gpui pipeline (DONE, gem `e1a228c`)
 
-Validate gpui-mobile's IosWindow a11y wiring (sub-commit 4)
-end-to-end on iOS Simulator: gpui's element pipeline → IosWindow's
-`take_accessibility_handler` closure → `SubclassingAdapter::update_if_active`.
+Gem-side spike at `spikes/gpui-ios-a11y-preview/`. Validates
+gpui-mobile's IosWindow a11y wiring (sub-commit 4) end-to-end on
+real iOS Simulator:
 
-Bigger lift than sub-commit 5 because iOS apps must boot via
-`UIApplicationMain` from a C `main()` with an Obj-C `UIApplicationDelegate`
-that calls back into Rust through FFI. gpui-mobile's `IosPlatform::run`
-is explicit: it stashes the launch callback for the FFI layer to
-invoke, instead of running its own loop. So 5b can't be a bare
-`fn main()`.
+  gpui Element::accessibility() → Window::drain_accessibility_tree
+  → IosWindow::take_accessibility_handler closure
+  → A11yState.initial_update + SubclassingAdapter::update_if_active
 
-Template exists: `vendor/gpui-mobile/example/ios/` (main.m with
-GPUIAppDelegate + UIApplicationMain, Info.plist, LaunchScreen.storyboard,
-gpui_ios.h).
+Output via `just spike-gpui-ios-a11y-preview` against booted iPhone
+17 sim:
 
-### Files to create
+```
+[a11y handler] TreeUpdate: 2 nodes  tree=true  focus=#16750113480898009215
+[a11y handler]   #16750113480898009215  role=Button  label=Some("hello a11y")
+[a11y handler]   #0  role=Window  label=None
+[spike-5b] assertion captured; exiting cleanly
+```
 
-1. **`spikes/gpui-ios-a11y-preview/Cargo.toml`** — standalone
-   workspace (gpui pulls zed's wgpu fork, conflicts with gem's
-   workspace, same as gpui-mac-preview). `[lib] crate-type =
-   ["staticlib"]`. Deps: `gpui` + `gpui_platform`
-   (`philipaw/zed @ gem/a11y-element-trait`), `gpui-mobile`
-   (path = vendor), `accesskit`. Add to gem's workspace `exclude`
-   list parallel to `spikes/gpui-mac-preview`.
+Same LabeledButton element + handler signature as
+`spikes/gpui-mac-preview` — the two outputs are diffable by eye,
+proving gpui's a11y pipeline behaves identically across macOS and
+iOS at the projection layer.
 
-2. **`spikes/gpui-ios-a11y-preview/src/lib.rs`** (~80 lines).
-   Extern-C entry points the AppDelegate calls:
-   `gpui_ios_register_app()` instantiates
-   `gpui_mobile::ios::current_platform`, builds `gpui::App` with it,
-   stashes a `cx.open_window` callback that constructs `HelloWorld`
-   (with the `LabeledButton` element from `gpui-mac-preview/main.rs`)
-   and installs a `set_accessibility_handler` observer that prints
-   TreeUpdates to `os_log` / NSLog. `gpui_ios_run_demo()` calls
-   `app.run`.
+### Implementation notes
 
-3. **`spikes/gpui-ios-a11y-preview/ios/main.m`** (~40 lines).
-   Lifted from `vendor/gpui-mobile/example/ios/main.m` with the
-   USE_GPUI_RUST=undef fallback Metal view stripped and only the
-   `USE_GPUI_RUST` path retained.
+- Standalone workspace at `spikes/gpui-ios-a11y-preview/`, excluded
+  from gem's root workspace (gpui pulls zed's wgpu fork, conflicts
+  with gem's workspace — same as gpui-mac-preview).
+- `[lib] crate-type = ["staticlib"]`. Deps: `gpui` (philipaw/zed
+  branch), `accesskit`, gpui-mobile (path = vendor, target-gated to
+  iOS). Note: skip `gpui_platform` — its `current_platform()` has
+  no iOS arm and fails to compile.
+- `src/lib.rs`: exports `gpui_ios_register_app` which stashes a
+  window-creation callback via gpui-mobile's
+  `set_app_callback`. The callback opens the window + installs the
+  a11y handler. After the first emission, calls
+  `std::process::exit(0)` — see Sub-commit 6 prereq below for why.
+- `ios/main.m`: GpuiAppDelegate that calls `gpui_ios_register_app`
+  + `gpui_ios_run_demo` from `didFinishLaunching`, sets up
+  CADisplayLink. Does **NOT** forward UIKit lifecycle events
+  (`applicationDidBecomeActive` etc.) to gpui-mobile's FFI — those
+  panic across `extern "C"` and abort.
+- `ios/Info.plist`: bundle id `dev.gem.gpui-ios-a11y-preview`,
+  `UILaunchScreen` dict (no separate storyboard / `ibtool` needed,
+  iOS 13+).
+- `ios/gpui_ios.h`: extern-C declarations for the AppDelegate ↔
+  Rust bridge. Includes the lifecycle hooks the AppDelegate intentionally
+  doesn't call so the header documents the full surface.
+- `build.sh`: hand-rolled bash. cargo build → `xcrun --sdk
+  iphonesimulator clang` link with the right framework set →
+  `.app` layout → `simctl install` + `simctl launch --console`.
+  No XcodeGen / `.xcodeproj`.
+- `justfile` recipe: `just spike-gpui-ios-a11y-preview` boots the
+  iPhone 17 simulator and runs `build.sh`.
 
-4. **`spikes/gpui-ios-a11y-preview/ios/gpui_ios.h`** (~10 lines).
-   Declares the extern-C symbols main.m calls.
+Failure-mode pre-flight per CLAUDE.md: temporarily made
+`LabeledButton::accessibility()` return `None`. The `[a11y handler]`
+lines disappeared entirely — `drain_accessibility_tree` early-returns
+on empty buffer (even stricter than the predicted "1 nodes" miss).
+Reverted before commit.
 
-5. **`spikes/gpui-ios-a11y-preview/ios/Info.plist`** — copied from
-   the example, bundle id `dev.gem.gpui-ios-a11y-preview`.
+### What 5b proves end-to-end on iOS
 
-6. **`spikes/gpui-ios-a11y-preview/ios/LaunchScreen.storyboard`** —
-   verbatim from the example.
-
-7. **`spikes/gpui-ios-a11y-preview/build.sh`** (~50 lines). No
-   XcodeGen dependency; hand-rolled bash that:
-   - `cargo build --target aarch64-apple-ios-sim --release -p
-     gpui-ios-a11y-preview` → `libgpui_ios_a11y_preview.a`.
-   - `xcrun --sdk iphonesimulator clang -framework UIKit -framework
-     Metal -framework Foundation -isysroot ... -arch arm64
-     -mios-simulator-version-min=15 main.m libgpui_ios_a11y_preview.a
-     -o GpuiIosA11yPreview.app/GpuiIosA11yPreview`.
-   - Lay out the `.app` directory with `Info.plist` + (compiled)
-     `LaunchScreen.storyboardc` (compile via `ibtool` from the
-     iphonesimulator SDK).
-   - `xcrun simctl install booted GpuiIosA11yPreview.app`.
-   - `xcrun simctl launch --console booted dev.gem.gpui-ios-a11y-preview`.
-
-8. **`justfile` recipe** `spike-gpui-ios-a11y-preview` boots the
-   iPhone 17 simulator and runs `build.sh`.
-
-### What 5b proves
-
-Stderr handler shows TreeUpdates with the `LabeledButton`'s
-Role::Button + label, frame after frame. That confirms:
-
-- gpui's element pipeline collects nodes from `Element::accessibility()`
-  overrides on iOS.
+- gpui's element pipeline collects nodes from
+  `Element::accessibility()` overrides on iOS.
 - IosWindow's `take_accessibility_handler` was actually called and
   its closure runs.
 - The closure wrote to `A11yState.initial_update` and called
-  `SubclassingAdapter::update_if_active` (otherwise the AT chain
-  wouldn't see anything in sub-commit 6).
+  `SubclassingAdapter::update_if_active` (the `exit(0)` runs from
+  inside that same closure).
 
-### Open question for 5b
+## Sub-commit 6 — VoiceOver-on-Simulator validation (TODO, blocked)
 
-Sub-commit 5's LabeledButton returns an AccessKit Node with no
-`set_bounds(...)` call. PlatformNode's `accessibilityFrame` returns
-ZERO. VoiceOver may not surface elements with zero rects (or may
-show them at the screen origin where they're hard to interact with).
-If 5b's stderr handler shows the right TreeUpdates but sub-commit
-6's VoiceOver doesn't pick up the button, the next move is to teach
-LabeledButton's `accessibility()` to call `node.set_bounds(...)` from
-the prepaint bounds. gpui-mac-preview probably gets away with no
-bounds because macOS VoiceOver is more permissive.
+**Blocked on the gpui-mobile UAF in `IosWindow.view`.** The 5b
+spike currently `exit(0)`s after the first a11y emission to dodge
+the crash; sub-commit 6 needs the app to **stay alive** so VoiceOver
+can focus + activate elements. See "Sub-commit 6 prereq" below for
+the fix scope.
 
-### Estimated effort
-
-A full focused session. Most of the time is debugging linker flags +
-the static-lib / main.m wiring + sim launch — not Rust. The Rust
-portion (lib.rs) is small.
-
-## Sub-commit 6 — VoiceOver-on-Simulator validation (TODO)
-
-Gated on 5b's installable `.app` bundle.
-
-`xcrun simctl ui booted accessibility_screen_navigation_enabled YES`
-(or use the Simulator's Settings → Accessibility → VoiceOver toggle)
-to enable VoiceOver in the booted simulator, relaunch the spike
-binary via `xcrun simctl launch`, observe VoiceOver announces the
-LabeledButton with the correct role + label when focused, and that
-a double-tap triggers `accessibilityActivate` (which fires our
-Action::Click via the IosActionHandler — same path sub-commit 5
-already validated end-to-end at the headless layer).
+Once the app stays alive past the first layout pass:
+- `xcrun simctl ui booted accessibility_screen_navigation_enabled YES`
+  (or use the Simulator's Settings → Accessibility → VoiceOver toggle)
+  to enable VoiceOver in the booted simulator.
+- Relaunch the spike via `xcrun simctl launch`.
+- Observe VoiceOver announces the LabeledButton with the correct
+  role + label when focused.
+- Double-tap triggers `accessibilityActivate` (which fires our
+  `Action::Click` via `IosActionHandler` — same path sub-commit 5
+  already validated end-to-end at the headless layer).
 
 Xcode's iOS Accessibility Inspector (Xcode → Open Developer Tool →
 Accessibility Inspector → switch target picker to Simulator) gives
 visual verification of the projected tree without needing VoiceOver
 gestures.
 
+### Open question for 6 (independent of UAF fix)
+
+Sub-commit 5b's `LabeledButton` returns an AccessKit Node with no
+`set_bounds(...)` call. `PlatformNode::accessibilityFrame` returns
+ZERO. VoiceOver may not surface elements with zero rects (or may
+show them at the screen origin where they're hard to interact with).
+If, after the UAF is fixed, VoiceOver doesn't pick up the button,
+the next move is to teach `LabeledButton::accessibility()` to call
+`node.set_bounds(...)` from the prepaint bounds.
+`gpui-mac-preview` probably gets away with no bounds because macOS
+VoiceOver is more permissive.
+
+## Sub-commit 6 prereq — fix gpui-mobile's `IosWindow.view` UAF
+
+`IosWindow.view: *mut AnyObject` (window.rs:451) is set to the
+output of `[MetalViewClass alloc]; [view initWithFrame:...]` and
+stored as a raw pointer. The view has +1 retain count after init
+but the IosWindow doesn't take ownership (no `Id` wrap, no
+explicit `retain`). Once the surrounding autorelease pool drains,
+the view's retain count drops to 0 and it deallocates. Subsequent
+`viewDidLayoutSubviews` from UIKit fires
+`handle_layout_change`, which sends `bounds` to the now-dangling
+pointer and segfaults (Data Abort, "byte read Translation fault").
+
+The defensive guards already in place help but don't cover this:
+- `if self.view.is_null() return` (window.rs:1319) — the pointer
+  is non-nil, just dangling. Doesn't fire.
+- `catch_unwind` around `handle_layout_change` in
+  `view_did_layout_subviews` (window.rs:103) — catches Rust panics,
+  not segfaults.
+
+**Fix sketch:** make `IosWindow.view` take ownership. Two viable
+shapes:
+- **(a) `view: objc2::rc::Id<UIView>`.** The objc2 `Id` type
+  manages retain/release. Replaces `*mut AnyObject` everywhere
+  `view` is read; needs `*const Id::as_ptr(&view) as *mut c_void`
+  for the FFI handoff to wgpu. ~30-50 lines of churn but
+  type-safe lifetime.
+- **(b) Explicit `retain` after init.** Add `let _: () =
+  msg_send![view, retain]` in `IosWindow::new` after the alloc/init
+  pair. Pair it with a `release` in `Drop`. Smaller diff
+  (~10 lines), but the lifetime is implicit / easy to break later.
+
+Same treatment likely needed for `text_input_view` and
+`view_controller` if they have the same pattern (verify before
+fixing — they may already be retained via parent-view attach).
+
+Validation: after the fix, remove `std::process::exit(0)` from
+`spikes/gpui-ios-a11y-preview/src/lib.rs` and confirm the app
+stays running. Also remove the `is_null` + `catch_unwind` guards
+from gpui-mobile's `window.rs` — they're documented workarounds
+for this bug, not real fixes.
+
 ## Cost recap
 
 Original §10.4 estimate: 6-8 sittings total for sub-commits 2-6.
 
-Done so far (5 sittings, denser than estimated):
+Done so far (6 sittings, denser than estimated):
 - 1 (scaffold) + 2a/b/c (Adapter + helpers + PlatformNode) +
   3 (SubclassingAdapter) + 4 (IosWindow integration) +
-  5 (headless validation, Path A).
+  5 (headless validation, Path A) +
+  5b (full app bundle + gpui pipeline, Path B).
 
-Remaining (2 sittings estimated):
-- 5b (full app bundle + gpui pipeline, Path B) — full session.
-- 6 (VoiceOver validation) — short session, gated on 5b.
+Remaining (1.5-2 sittings estimated):
+- Sub-commit 6 prereq (gpui-mobile UAF fix on `IosWindow.view`) —
+  half-session, mostly Rust + a careful read of the surrounding
+  view-controller / wgpu hand-off code in gpui-mobile.
+- 6 (VoiceOver validation) — short session, gated on the prereq.
 
 ## Lessons carried forward
 
-Don't re-discover these in 5b/6 or in any future iOS adapter work:
+Don't re-discover these in 6 or in any future iOS adapter work:
 
 - **objc2 versioning**: stay on `objc2 = "0.5"` line +
   `objc2-foundation = "0.2"` + `objc2-ui-kit = "0.2.2"` so we
@@ -387,6 +430,51 @@ Don't re-discover these in 5b/6 or in any future iOS adapter work:
   validation unblocker** for Layer 2 sub-4. `IosWindow::debug_inject_a11y_action`
   (added in sub-commit 4) is the iOS equivalent. Always add this
   hook from day one — retrofitting hurts.
+
+- **gpui-mobile lifecycle FFI (`gpui_ios_did_become_active` etc.)
+  panics across `extern "C"`**. `notify_active_status_change` does
+  a `RefCell::borrow_mut` on `active_status_callback` that races /
+  fails on the spike's call sequence; the panic can't unwind across
+  the C boundary, so the process aborts. For spike-quality apps,
+  **don't** forward UIKit lifecycle events from the AppDelegate to
+  gpui-mobile's FFI — the methods can stay empty and the spike still
+  works (sub-commit 5b's main.m demonstrates this).
+
+- **`gpui_platform::current_platform()` has no iOS arm.** It's
+  defined to dispatch by OS to a built-in `Platform` impl, but the
+  iOS arm is missing — returns `()` and fails to compile. iOS spikes
+  hand the platform in directly via
+  `gpui::Application::with_platform(gpui_mobile::ios::current_platform(false))`,
+  skipping `gpui_platform` entirely.
+
+- **gpui-mobile's `gpui_ios_run_demo` does the entire
+  `Application::run` + invoke-callback dance synchronously.**
+  Register your window-creation callback via
+  `gpui_mobile::ios::ffi::set_app_callback` first; the AppDelegate
+  then calls `gpui_ios_register_app` (your function that calls
+  `set_app_callback`) followed by `gpui_ios_run_demo`. Don't try to
+  manually construct + run the gpui Application from extern-C entry
+  points — `IosPlatform::run` only stashes the callback and returns;
+  `gpui_ios_run_demo` is what actually invokes it.
+
+- **iOS spike `.app` bundles can be hand-rolled, no XcodeGen.** A
+  staticlib + a single Obj-C `main.m` + `Info.plist` (with
+  `UILaunchScreen` dict, no separate storyboard) + an `xcrun --sdk
+  iphonesimulator clang` link is sufficient for `simctl install` /
+  `simctl launch`. The framework set sub-commit 5b's `build.sh`
+  uses (UIKit + Foundation + QuartzCore + Metal + MetalKit +
+  CoreGraphics + CoreText + CoreFoundation + AVFoundation +
+  AudioToolbox + CoreVideo + CoreMedia + VideoToolbox + ImageIO +
+  Security + SystemConfiguration + CoreServices + IOSurface +
+  `-lc++` + `-liconv`) is a known-good baseline for gpui-mobile
+  with default features.
+
+- **gpui-mobile's `IosWindow.view` is not retained** — see
+  "Sub-commit 6 prereq" above. Spike apps that need to stay alive
+  past the first UIKit layout pass (i.e. anything more than a
+  one-shot a11y emission probe) WILL hit this UAF and abort.
+  Workaround until fixed: `std::process::exit(0)` from the spike's
+  callback after the data you needed has been captured.
 
 - **iOS spike harness can't be a bare `fn main()` for gpui-driven
   workloads** — `IosPlatform::run` requires `UIApplicationMain` to
