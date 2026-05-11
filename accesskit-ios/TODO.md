@@ -8,37 +8,69 @@ full landed set on top and the remaining work near the bottom.
 `~/.cargo/registry/src/.../accesskit_macos-0.26.0/src/`. Files
 referenced below are within that path.
 
-## Status (2026-05-10)
+## Status (2026-05-10) — Layer 3 done end-to-end
 
 **Done:** scaffold (1) + state machine (2a) + query helpers (2b) +
 PlatformNode + objc deps (2c) + SubclassingAdapter (3) + gpui-mobile
 IosWindow integration (4) + headless end-to-end on iOS Simulator (5,
 Path A) + full app bundle + gpui pipeline end-to-end on iOS Simulator
-(5b, Path B) + gpui-mobile IosWindow.window UAF fix (6 prereq #1) +
-sub-commit 6 manual-verification recipe (6 doc-only).
+(5b, Path B) + IosWindow.window UAF fix (6 prereq #1) + AT can read
+the gpui-projected tree on real iOS Simulator (6, verified via
+Accessibility Inspector).
 
-The whole §10.4 Layer 3 stack is structurally complete. End-to-end
-coverage on real iOS Simulator across two spikes:
+**The chain works end-to-end on real iOS:**
+
+  gpui Element::accessibility()
+  → Window::drain_accessibility_tree
+  → IosWindow::take_accessibility_handler closure
+  → A11yState.initial_update + SubclassingAdapter::update_if_active
+  → (UIKit/AT queries the subclassed UIView)
+  → Adapter::accessibility_element_at_index_objc
+  → Context::get_or_create_platform_node
+  → PlatformNode (UIAccessibilityElement subclass)
+  → AT sees: role=Button, label="hello a11y"   ← verified via Accessibility Inspector
+
+End-to-end coverage on real iOS Simulator across two spikes:
 - `spikes/gpui-ios-a11y-headless`: synthesized TreeUpdate →
   SubclassingAdapter → PlatformNode → UIAccessibility selector
-  round-trip, including `accessibilityActivate` firing
+  round-trip including `accessibilityActivate` firing
   `Action::Click`.
 - `spikes/gpui-ios-a11y-preview`: full app via UIApplicationMain →
   GpuiAppDelegate → gpui-mobile FFI → IosWindow → SubclassingAdapter,
   with the gpui element pipeline emitting per-frame TreeUpdates
   through `IosWindow::take_accessibility_handler`'s closure.
+  Accessibility Inspector targeting the booted sim walks into the
+  app's tree and sees the projected LabeledButton.
 
-**Remaining:** sub-commit 6 prereq #2 — fix gpui-mobile's
-`Application::run` lifecycle on iOS so the gpui::App doesn't drop
-when `run` returns. Today it does, which (a) means the spike's
-UIWindow tree is "snapshot-displayed" by UIKit but actually
-deallocated underneath, and (b) blocks programmatic verification of
-sub-commit 6 (a `dispatch_after`-based block in main.m that queries
-UIAccessibility selectors after a settle delay segfaults inside
-`objc_retain` on the freed UIWindow). Doesn't block VoiceOver
-itself — VoiceOver runs in another process and queries the app
-while it's still alive. See "Sub-commit 6 prereq #2" below for
-the fix sketch.
+**Carried-forward open items** (not blockers for §10.4 Layer 3 itself
+but desirable cleanups):
+
+- **Sub-commit 6 prereq #2 (App-lifetime fix)**: gpui-mobile's
+  `Application::run` on iOS consumes `Application` by value and
+  returns immediately, dropping the gpui App. Worked around in
+  sub-commit 6 by leaking the long-lived fields from
+  `IosWindow::Drop` (UIWindow Retained + a11y_adapter Arc +
+  a11y_state Arc), but the right fix is a gpui-side
+  `Application::run_until(&mut self, ...)` companion. See
+  "Sub-commit 6 prereq #2" below.
+- **gpui-mobile `gpui_ios_request_frame` re-entrancy** —
+  CADisplayLink-driven renderer panics on first frame
+  (`RefCell already borrowed`). Worked around by NOT installing
+  the display link in `spikes/gpui-ios-a11y-preview/ios/main.m`
+  (Sub-commit 6 doesn't need rendering — UIAccessibility selectors
+  route through the SubclassingAdapter independently of draw). The
+  app-running-blank screen is a symptom of this; not an a11y issue.
+- **`PlatformNode::accessibilityFrame` returns ZERO** because
+  `LabeledButton::accessibility()` doesn't call `node.set_bounds()`.
+  VoiceOver's focus rect would be 0×0 at origin. Real bounds need
+  to flow from gpui's `prepaint` bounds. Quick fix when needed.
+- **`view_controller`, `view`, `text_input_view`** in IosWindow
+  remain raw pointers (only `window` was upgraded to
+  `Retained<AnyObject>`). They're transitively held by the
+  setRootViewController → setView → addSubview retain chain, so
+  the single retain on `window` suffices for correctness, but
+  modernizing all four to `Retained` is hygiene that future
+  cleanup sweeps should do.
 
 All accesskit-ios crate sub-commits live on
 `philipaw/gpui-mobile` branch `gem/accesskit-ios-scaffold`. Gem-side
@@ -281,56 +313,59 @@ Reverted before commit.
   `SubclassingAdapter::update_if_active` (the `exit(0)` runs from
   inside that same closure).
 
-## Sub-commit 6 — VoiceOver-on-Simulator validation (manual-only this commit)
+## Sub-commit 6 — AT can read the gpui-projected tree on real iOS Simulator (DONE, gem `0cb3f68`)
 
-The spike now stays alive after the UAF fix (gpui-mobile @ `31e3c16`),
-so VoiceOver can interact with it. Sub-commit 6 ships as
-**documentation** — a manual verification recipe — because
-programmatic verification (a dispatch_after block in main.m that
-queries UIAccessibility selectors against the gpui UIWindow) hits
-a separate gpui-mobile lifecycle issue described under "Sub-commit
-6 programmatic-verification prereq" below.
+Two fixes in `philipaw/gpui-mobile @ 2038a64` got the chain working
+end-to-end:
 
-### Manual VoiceOver recipe
+1. **`accesskit-ios::PlatformNode::new`** now calls
+   `initWithAccessibilityContainer:` (the host UIView, resolved
+   from `Weak<Context>.upgrade() → WeakId<UIView>.load()`) instead
+   of bare `[super init]`. iOS 26 raises
+   `NSInvalidArgumentException: Use initWithAccessibilityContainer:`
+   when UIAccessibilityElement subclasses are initialized without
+   a container.
+
+2. **`gpui-mobile::IosWindow::Drop`** leaks the long-lived fields
+   (UIWindow `Retained`, `a11y_adapter` Arc, `a11y_state` Arc) so
+   the UIWindow + SubclassingAdapter class swap + handler state
+   survive when gpui's `Application::run` drops the App on return.
+   Workaround for sub-commit 6 prereq #2 (real fix is gpui-side).
+
+### Verification (recorded 2026-05-10)
 
 ```
-# 1. Build + boot + launch the spike (terminal A).
+# Terminal A — boot + run spike (leaves app alive in sim).
 just spike-gpui-ios-a11y-preview
 
-# 2. In the Simulator app, enable VoiceOver:
-#    Settings → Accessibility → VoiceOver → toggle ON.
-#    (Or, programmatically before launching:
-#       xcrun simctl spawn booted notifyutil -s \
-#         com.apple.UIKit.AccessibilityVoiceOverEnabled 1
-#     — note this varies by iOS version.)
-
-# 3. With VoiceOver on, swipe right inside the app's window to focus
-#    elements. Expect VoiceOver to announce: "hello a11y, button"
-#    (label + role from the LabeledButton element).
-
-# 4. Double-tap to fire the Click action. Expect the gpui-mobile
-#    IosActionHandler to log:
-#      [a11y] Action::Focus / Action::Click ... (enqueued)
-#    in the --console output, plus the next gpui draw to dispatch
-#    the queued PendingA11yAction.
+# Xcode → Open Developer Tool → Accessibility Inspector.
+# Target picker (top-left toolbar) → select the booted iPhone 17 sim.
+# Inspection Pointer → point at the spike app's window.
+# Expected: a Button element with label "hello a11y" shows up in
+# the detail pane.
 ```
 
-Xcode's iOS Accessibility Inspector (Xcode → Open Developer Tool →
-Accessibility Inspector → switch target picker to the booted
-Simulator) gives visual verification of the projected tree without
-VoiceOver gestures — useful for tree-walking + focus-rect inspection.
+**The screen looks blank** in the simulator because the wgpu/Metal
+renderer doesn't tick — `CADisplayLink` is intentionally not
+installed in `spikes/gpui-ios-a11y-preview/ios/main.m` to work
+around the gpui-mobile `gpui_ios_request_frame` re-entrancy bug
+(see "Carried-forward open items" in the Status section). A11y is
+independent of rendering, so Inspector sees the projected tree
+regardless.
 
-### Open question for 6 (independent of all prereqs)
+### Alternative validation paths
 
-Sub-commit 5b's `LabeledButton` returns an AccessKit Node with no
-`set_bounds(...)` call. `PlatformNode::accessibilityFrame` returns
-ZERO. VoiceOver may not surface elements with zero rects (or may
-show them at the screen origin where they're hard to interact with).
-If VoiceOver doesn't pick up the button during the manual recipe,
-the next move is to teach `LabeledButton::accessibility()` to call
-`node.set_bounds(...)` from the prepaint bounds.
-`gpui-mac-preview` probably gets away with no bounds because macOS
-VoiceOver is more permissive.
+- **VoiceOver via simctl** (untested as of 2026-05-10; recipe
+  varies by iOS version):
+  ```
+  xcrun simctl spawn booted defaults write com.apple.Accessibility VoiceOverTouchEnabled -bool YES
+  ```
+  Then swipe right inside the app, expect "hello a11y, button"
+  announcement. Double-tap to fire Action::Click (look for
+  `[a11y] Action::Click ... (enqueued)` in the --console output).
+- **VoiceOver via Settings** — Settings → Accessibility → VoiceOver
+  in iOS 26's Settings.app reorganized location (verify per
+  Apple's current docs).
 
 ## Sub-commit 6 prereq #1 — fix gpui-mobile's `IosWindow.view` UAF (DONE, `31e3c16`)
 
@@ -417,24 +452,61 @@ the verify block to print `[a11y verify] PASS` and `exit(0)`.
 
 Original §10.4 estimate: 6-8 sittings total for sub-commits 2-6.
 
-Done so far (7 sittings, denser than estimated):
+Actual (Layer 3 done in 8 sittings):
 - 1 (scaffold) + 2a/b/c (Adapter + helpers + PlatformNode) +
   3 (SubclassingAdapter) + 4 (IosWindow integration) +
   5 (headless validation, Path A) +
   5b (full app bundle + gpui pipeline, Path B) +
-  6 prereq #1 (gpui-mobile IosWindow.window UAF fix) +
-  6 manual-only (this commit, doc + recipe).
+  6 prereq #1 (IosWindow.window UAF fix) +
+  6 (initWithAccessibilityContainer + IosWindow::Drop leak;
+     Accessibility Inspector verifies end-to-end on iOS 26 sim).
 
-Remaining (variable):
-- 6 prereq #2 (gpui-mobile App-lifetime fix so `Application::run`
-  doesn't drop the App on iOS) — full session of gpui-side API
-  design work + gpui-mobile FFI rewiring. Unblocks programmatic
-  6a verification.
-- VoiceOver manual recipe execution (short session, by hand).
+Future cleanup (none block Layer 3):
+- 6 prereq #2 (gpui-side `Application::run_until(&mut self, ...)`
+  so the App-lifetime leak workaround in IosWindow::Drop can go
+  away). Full session of gpui-core API design work.
+- `gpui_ios_request_frame` re-entrancy bug fix (re-enables
+  rendering in the spike + any future iOS app).
+- `LabeledButton::accessibility()` should call `node.set_bounds()`
+  from prepaint bounds so VoiceOver's focus rect isn't 0×0.
+- Modernize remaining raw pointer fields (`view_controller`,
+  `view`, `text_input_view`) to `Retained` for hygiene.
 
 ## Lessons carried forward
 
-Don't re-discover these in 6 or in any future iOS adapter work:
+Don't re-discover these in future iOS adapter work:
+
+- **iOS 26 enforces `initWithAccessibilityContainer:` for
+  `UIAccessibilityElement` subclasses.** Bare `[super init]` raises
+  `NSInvalidArgumentException: Use initWithAccessibilityContainer:`
+  the first time UIKit's AT machinery enumerates your container's
+  children. PlatformNode::new resolves the host UIView (via
+  `Weak<Context>.upgrade()` + `WeakId<UIView>.load()` BEFORE the
+  alloc + set_ivars step, since `PartialInit` doesn't expose
+  `ivars()`) and passes it as the container.
+
+- **gpui's `Application::run(self, callback)` on iOS consumes
+  Application by value and returns immediately** (IosPlatform::run
+  just stashes the launch callback). The App drops on return,
+  cascading down through Window → Box<dyn PlatformWindow> →
+  IosWindow → all retained inner state. Workaround:
+  `IosWindow::Drop` leaks `self.window.clone()`, `self.a11y_adapter
+  .clone()`, `self.a11y_state.clone()` so UIWindow + SubclassingAdapter
+  + handler state survive. Real fix: gpui core needs
+  `Application::run_until(&mut self, ...)` so embedders can keep
+  Application alive past the run callback.
+
+- **Accessibility Inspector is sufficient for AT validation** — it
+  reads the same UIAccessibility tree VoiceOver does, but doesn't
+  require enabling VoiceOver in the simulator (which may be hard
+  to find / toggle on newer iOS versions). Xcode → Open Developer
+  Tool → Accessibility Inspector → target picker → booted sim →
+  Inspection Pointer.
+
+- **Simulator screen blank ≠ a11y broken.** wgpu rendering and
+  UIAccessibility are independent surfaces. AT can perceive the
+  projected tree even when no pixels are drawn. Use Inspector's
+  tree-walk to confirm a11y, not the simulator's visible content.
 
 - **objc2 versioning**: stay on `objc2 = "0.5"` line +
   `objc2-foundation = "0.2"` + `objc2-ui-kit = "0.2.2"` so we
