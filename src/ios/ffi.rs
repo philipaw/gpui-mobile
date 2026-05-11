@@ -518,7 +518,14 @@ pub fn run_app() {
     }
 
     let platform = Rc::new(super::IosPlatform::new());
-    Application::with_platform(platform).run(|cx: &mut App| {
+    let mut app = Application::with_platform(platform);
+    // `run_until(&mut self, ...)` (gpui core, philipaw/zed @ bb5281fa7d+):
+    // the `&mut self` shape lets us hold `app` past the run callback,
+    // which Platform::run on iOS returns from immediately. Plain `run`
+    // would consume `app` and drop the underlying Rc<AppCell>, which
+    // cascades down through Window → IosWindow → UIKit tree and
+    // leaves the simulator showing a snapshot of freed memory.
+    app.run_until(|cx: &mut App| {
         if let Some(cb) = take_app_callback() {
             log::info!("GPUI iOS: Invoking user-provided app callback");
             cb(cx);
@@ -536,14 +543,32 @@ pub fn run_app() {
         }
     });
 
-    // On iOS, Application::run() stores the callback and returns immediately.
-    // The finish-launching callback is forwarded to set_finish_launching_callback
-    // and invoked here synchronously (in a real app the app delegate does this).
+    // On iOS, Application::run_until() stores the launch callback (via
+    // IosPlatform::run → set_finish_launching_callback) and returns
+    // immediately. Invoke it here synchronously so the AppDelegate
+    // doesn't have to (in a properly-structured iOS app the
+    // AppDelegate would call gpui_ios_did_finish_launching instead;
+    // for the spike, we collapse that into run_app to keep main.m
+    // simple).
     if let Some(state) = IOS_APP_STATE.get() {
         let callback = unsafe { (*state.finish_launching.get()).take() };
         if let Some(callback) = callback {
-            log::info!("GPUI iOS: Invoking Application::run callback");
+            log::info!("GPUI iOS: Invoking Application::run_until callback");
             callback();
         }
     }
+
+    // Leak the Application so its underlying Rc<AppCell> outlives
+    // run_app. Without this, dropping `app` here would cascade down
+    // through the gpui App's Windows → Box<dyn PlatformWindow> →
+    // IosWindow → UIKit tree, leaving the simulator showing a
+    // snapshot of freed memory and the AT walking dangling pointers
+    // in IOS_WINDOW_LIST.
+    //
+    // The leak is deliberate and permanent for the lifetime of the
+    // iOS process. A future cleanup could stash `app` in a static
+    // for explicit teardown on app termination, but until iOS
+    // teardown is meaningful (the OS terminates the process anyway)
+    // mem::forget is the simplest correct shape.
+    std::mem::forget(app);
 }
