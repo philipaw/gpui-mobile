@@ -108,13 +108,25 @@ fn register_view_controller_class() -> &'static AnyClass {
             }
 
             // Notify all registered GPUI windows about the layout change.
+            // catch_unwind: handle_layout_change can panic (RefCell borrow
+            // races, msg_send to half-initialized objc state on the first
+            // layout pass, etc.) — first observed in
+            // `spikes/gpui-ios-a11y-preview` (sub-commit 5b). Without
+            // this guard, the panic propagates across the extern "C"
+            // boundary as panic_cannot_unwind → abort(). Absorb here;
+            // a follow-up should fix the underlying handle_layout_change
+            // panic instead of catching it.
             if let Some(wrapper) = super::ffi::IOS_WINDOW_LIST.get() {
                 unsafe {
                     let windows = &*wrapper.0.get();
                     for &window_ptr in windows.iter() {
                         if !window_ptr.is_null() {
                             let window = &*window_ptr;
-                            window.handle_layout_change();
+                            let _ = std::panic::catch_unwind(
+                                std::panic::AssertUnwindSafe(|| {
+                                    window.handle_layout_change();
+                                }),
+                            );
                         }
                     }
                 }
@@ -1309,6 +1321,16 @@ impl IosWindow {
     /// Queries the current UIView bounds, updates the stored bounds/scale,
     /// reconfigures the Metal layer + wgpu surface, and fires the resize callback.
     pub fn handle_layout_change(&self) {
+        // Guard: viewDidLayoutSubviews on the GPUIViewController can fire
+        // before the spike's IosWindow has a fully-attached metal view —
+        // first observed in `spikes/gpui-ios-a11y-preview` (sub-commit 5b),
+        // where the app aborts on `messsaging bounds to nil` from
+        // applicationDidBecomeActive's first layout pass. Skip silently
+        // when the metal view pointer is null; subsequent layout passes
+        // (after the view is wired up) still process normally.
+        if self.view.is_null() {
+            return;
+        }
         unsafe {
             let view_bounds: ObjcCGRect = msg_send![self.view, bounds];
             let screen: *mut AnyObject = msg_send![class!(UIScreen), mainScreen];
