@@ -728,12 +728,26 @@ impl IosWindow {
                 preferred_present_mode: None,
             };
 
+            // wgpu 29 requires a non-None `display` on the
+            // InstanceDescriptor — `gpui_wgpu::create_surface()` (used
+            // internally by `WgpuRenderer::new` to attach a real
+            // surface) passes `raw_display_handle: None` precisely to
+            // fall back here. Without this, surface creation fails at
+            // "No `DisplayHandle` is available to create this surface
+            // with" and the renderer is left as None → draw is a
+            // no-op → iOS sim shows BLACK even though gpui's element
+            // pipeline runs fine. RawIosWindow is a wgt::WgpuHasDisplayHandle
+            // (HasDisplayHandle + Debug + Send + Sync + 'static) so
+            // boxing it satisfies the trait bound.
+            let raw_window_for_instance = RawIosWindow {
+                view: ios_window.view as *mut c_void,
+            };
             let metal_instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::METAL,
                 flags: wgpu::InstanceFlags::default(),
                 backend_options: wgpu::BackendOptions::default(),
                 memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-                display: None,
+                display: Some(Box::new(raw_window_for_instance)),
             });
 
             let raw_window = RawIosWindow {
@@ -742,6 +756,9 @@ impl IosWindow {
 
             // Build a temporary surface for WgpuContext initialisation
             // (adapter selection needs a surface to test compatibility).
+            // `raw_display_handle: None` falls back to the display set
+            // on `InstanceDescriptor::display` above (wgpu 29 semantics,
+            // matches what `gpui_wgpu::create_surface()` does internally).
             let window_handle = raw_window
                 .window_handle()
                 .expect("iOS window handle unavailable");
