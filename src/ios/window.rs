@@ -27,7 +27,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{class, msg_send, sel};
 
-use super::cg_types::ObjcCGRect;
+use super::cg_types::{ObjcCGPoint, ObjcCGRect};
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, UiKitDisplayHandle, UiKitWindowHandle};
 use std::{
@@ -240,6 +240,17 @@ fn register_metal_view_class() -> &'static AnyClass {
             handle_touches(this, touches, event);
         }
 
+        // UIPinchGestureRecognizer action target. The recognizer fires this
+        // selector on its target on every state transition (Began / Changed /
+        // Ended / Cancelled); the recognizer itself is passed as the sender.
+        extern "C" fn handle_pinch(
+            this: *mut AnyObject,
+            _sel: Sel,
+            recognizer: *mut AnyObject,
+        ) {
+            handle_pinch_recognizer(this, recognizer);
+        }
+
         unsafe {
             // Add class method for layerClass
             decl.add_class_method(
@@ -264,6 +275,10 @@ fn register_metal_view_class() -> &'static AnyClass {
                 sel!(touchesCancelled:withEvent:),
                 touches_cancelled
                     as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject),
+            );
+            decl.add_method(
+                sel!(handlePinch:),
+                handle_pinch as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
         }
 
@@ -443,6 +458,20 @@ fn handle_touches(view: *mut AnyObject, touches: *mut AnyObject, event: *mut Any
     }
 }
 
+/// Route UIPinchGestureRecognizer callbacks to `IosWindow::handle_pinch`.
+fn handle_pinch_recognizer(view: *mut AnyObject, recognizer: *mut AnyObject) {
+    unsafe {
+        #[allow(deprecated)]
+        let window_ptr: *mut std::ffi::c_void = *(*view).get_ivar(GPUI_WINDOW_IVAR);
+        if window_ptr.is_null() {
+            log::warn!("GPUI iOS: Pinch event but no window pointer set");
+            return;
+        }
+        let window = &*(window_ptr as *const IosWindow);
+        window.handle_pinch(recognizer);
+    }
+}
+
 /// iOS Window backed by UIWindow + UIViewController.
 /// Distance (logical px) the finger must travel before a touch
 /// is promoted from a potential tap to a scroll gesture.
@@ -614,6 +643,20 @@ impl IosWindow {
             // Enable user interaction on the Metal view for touch handling
             let _: () = msg_send![view, setUserInteractionEnabled: true];
             let _: () = msg_send![view, setMultipleTouchEnabled: true];
+
+            // Attach a UIPinchGestureRecognizer so 2-finger pinches emit
+            // PlatformInput::Pinch through the input pipeline. Default
+            // `cancelsTouchesInView=YES` is intentional: when the
+            // recognizer transitions to Began, UIKit fires touchesCancelled
+            // on any in-flight single-touch handlers, so the existing
+            // tap/scroll path (handle_touch above) cleanly bows out and
+            // downstream gem-side gesture state machines see a clean
+            // Cancelled signal.
+            let pinch_recognizer: *mut AnyObject =
+                msg_send![class!(UIPinchGestureRecognizer), alloc];
+            let pinch_recognizer: *mut AnyObject =
+                msg_send![pinch_recognizer, initWithTarget: view, action: sel!(handlePinch:)];
+            let _: () = msg_send![view, addGestureRecognizer: pinch_recognizer];
 
             // Set the view as the view controller's view
             let _: () = msg_send![view_controller, setView: view];
@@ -1095,6 +1138,47 @@ impl IosWindow {
         }
 
         self.touch_state.set(ts);
+    }
+
+    /// Handle a UIPinchGestureRecognizer callback. Emits one
+    /// `PlatformInput::Pinch` per state transition we care about. We use
+    /// the standard Apple pattern of reading `recognizer.scale` (cumulative
+    /// since the last reset) and resetting it back to 1.0 — so each emitted
+    /// `delta` is the per-event change, matching the gpui::PinchEvent
+    /// contract that macOS NSEvent.magnification already satisfies.
+    pub fn handle_pinch(&self, recognizer: *mut AnyObject) {
+        // UIGestureRecognizerState raw values:
+        //   0 = Possible, 1 = Began, 2 = Changed,
+        //   3 = Ended, 4 = Cancelled, 5 = Failed
+        let state: i64 = unsafe { msg_send![recognizer, state] };
+        let scale: f64 = unsafe { msg_send![recognizer, scale] };
+        let location: ObjcCGPoint =
+            unsafe { msg_send![recognizer, locationInView: self.view] };
+
+        let (phase, delta) = match state {
+            1 => (gpui::TouchPhase::Started, (scale - 1.0) as f32),
+            2 => (gpui::TouchPhase::Moved, (scale - 1.0) as f32),
+            3 | 4 => (gpui::TouchPhase::Ended, (scale - 1.0) as f32),
+            _ => return,
+        };
+
+        // Normalize the recognizer so the next callback's `scale` is again
+        // measured from 1.0 — this gives us per-event deltas naturally.
+        let _: () = unsafe { msg_send![recognizer, setScale: 1.0_f64] };
+
+        let position = gpui::point(
+            gpui::px(location.x as f32),
+            gpui::px(location.y as f32),
+        );
+
+        if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
+            callback(PlatformInput::Pinch(gpui::PinchEvent {
+                position,
+                delta,
+                modifiers: self.modifiers.get(),
+                phase,
+            }));
+        }
     }
 
     /// Query the safe area insets from the UIView.
