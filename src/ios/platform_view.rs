@@ -283,8 +283,10 @@ impl IosPlatformView {
     ///
     /// This should be called once after creation, typically from the
     /// platform view element's first paint. Subsequent calls are no-ops.
+    /// Renamed from `insert_into_window` so the trait method on
+    /// `PlatformView` can call this without shadowing or recursing.
     #[cfg(target_os = "ios")]
-    pub fn insert_into_window(&self) -> Result<(), String> {
+    fn do_insert_into_window(&self) -> Result<(), String> {
         // Guard against double-insertion.
         if self.inserted.swap(true, Ordering::Relaxed) {
             return Ok(());
@@ -302,28 +304,54 @@ impl IosPlatformView {
                 if let Some(&window_ptr) = windows.last() {
                     if !window_ptr.is_null() {
                         let window = &*window_ptr;
-                        // Get the view controller's view (parent of Metal view)
-                        let vc: *mut AnyObject = window.view_controller_ptr();
-                        let vc_view: *mut AnyObject = msg_send![vc, view];
-                        if !vc_view.is_null() {
-                            // Get the Metal view
-                            let metal_view = window.metal_view_ptr();
-                            if !metal_view.is_null() {
-                                // Insert below the Metal view so GPUI renders on top
+                        // The Metal view IS the view controller's
+                        // root view (window.rs sets
+                        // `view_controller.setView: metal_view`), so
+                        // for "below-Metal" composition we use the
+                        // Metal view's *superview* — the UIWindow —
+                        // as the insertion parent and insert the
+                        // native view below the Metal view there.
+                        // Earlier iterations of this scaffold used
+                        // `vc.view` as the parent, but that's the
+                        // Metal view itself — which would make the
+                        // native view a CHILD of the Metal view
+                        // (rendered on top of the Metal scene paint,
+                        // not below).
+                        let metal_view = window.metal_view_ptr();
+                        if !metal_view.is_null() {
+                            let parent: *mut AnyObject =
+                                msg_send![metal_view, superview];
+                            if !parent.is_null() {
                                 let _: () = msg_send![
-                                    vc_view,
+                                    parent,
                                     insertSubview: native_view,
                                     belowSubview: metal_view
                                 ];
-                            } else {
-                                // Fallback: just add as subview
-                                let _: () = msg_send![vc_view, addSubview: native_view];
+                                log::info!(
+                                    "IosPlatformView: inserted view {} below Metal view",
+                                    self.id
+                                );
+                                // Verdict-side dump: walk
+                                // `[parent subviews]` (the UIWindow)
+                                // and emit one line per subview
+                                // (class name + frame). Step-1
+                                // platform_view scaffolding verdict
+                                // reads these from
+                                // `simctl launch --console` to
+                                // confirm:
+                                //   (a) the inserted view is in the
+                                //       subviews list, and
+                                //   (b) it appears BEFORE
+                                //       GPUIMetalView
+                                //       (insertSubview:belowSubview:
+                                //       puts the new view earlier
+                                //       in the subviews array).
+                                // Routed through `eprintln!` (not
+                                // log::) so the trace doesn't depend
+                                // on a logger being configured.
+                                Self::dump_view_hierarchy(parent, self.id);
+                                return Ok(());
                             }
-                            log::info!(
-                                "IosPlatformView: inserted view {} into window hierarchy",
-                                self.id
-                            );
-                            return Ok(());
                         }
                     }
                 }
@@ -331,6 +359,48 @@ impl IosPlatformView {
         }
         self.inserted.store(false, Ordering::Relaxed);
         Err("No GPUI window available to host platform view".to_string())
+    }
+
+    /// Walk a UIView's `subviews` array and print one line per child
+    /// to stderr. Step-1 platform_view verdict: lets a host-side
+    /// harness scan the line stream emitted by
+    /// `simctl launch --console` for `[platform-view-hierarchy]
+    /// subview[N]: <Class> ...` and assert structural properties
+    /// (e.g. WKWebView present, ordered before GPUIMetalView).
+    #[cfg(target_os = "ios")]
+    fn dump_view_hierarchy(vc_view: *mut AnyObject, inserted_id: PlatformViewId) {
+        use objc2::runtime::AnyClass;
+        unsafe {
+            let subviews: *mut AnyObject = msg_send![vc_view, subviews];
+            if subviews.is_null() {
+                eprintln!(
+                    "[platform-view-hierarchy] vc.view has nil subviews (insert id={inserted_id})"
+                );
+                return;
+            }
+            let count: usize = msg_send![subviews, count];
+            eprintln!(
+                "[platform-view-hierarchy] inserted id={inserted_id}; Metal view's superview has {count} subview(s) (earlier index = lower z):"
+            );
+            for i in 0..count {
+                let subview: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
+                if subview.is_null() {
+                    eprintln!("[platform-view-hierarchy] subview[{i}]: <nil>");
+                    continue;
+                }
+                let cls_ptr: *const AnyClass = msg_send![subview, class];
+                let name = if cls_ptr.is_null() {
+                    "<null-class>".to_string()
+                } else {
+                    (&*cls_ptr).name().to_string_lossy().into_owned()
+                };
+                let frame: ObjcCGRect = msg_send![subview, frame];
+                eprintln!(
+                    "[platform-view-hierarchy] subview[{i}]: class={name} frame=({:.0},{:.0},{:.0},{:.0})",
+                    frame.x, frame.y, frame.width, frame.height
+                );
+            }
+        }
     }
 
     /// Update the native view's frame.
@@ -386,6 +456,20 @@ impl PlatformView for IosPlatformView {
         #[cfg(not(target_os = "ios"))]
         {
             let _ = visible;
+        }
+    }
+
+    fn insert_into_window(&self) -> Result<(), String> {
+        if self.disposed.load(Ordering::Relaxed) {
+            return Err("View is disposed".into());
+        }
+        #[cfg(target_os = "ios")]
+        {
+            return self.do_insert_into_window();
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            Ok(())
         }
     }
 

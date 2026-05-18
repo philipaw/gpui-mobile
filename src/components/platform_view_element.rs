@@ -44,6 +44,17 @@ pub fn platform_view_element(handle: Arc<PlatformViewHandle>) -> gpui::Div {
                 };
                 handle.set_bounds(logical_bounds);
                 handle.set_visible(true);
+                // First-paint insertion: the iOS impl guards against
+                // re-insertion via an AtomicBool, so this is cheap on
+                // every subsequent frame. Android no-ops by default —
+                // its insertion happens at create time via the JNI
+                // bridge.
+                if let Err(e) = handle.insert_into_window() {
+                    log::warn!(
+                        "platform_view_element: insert_into_window failed: {}",
+                        e
+                    );
+                }
             },
         )
         .size_full(),

@@ -98,6 +98,19 @@ pub trait PlatformView: Send + Sync {
     /// when the view is explicitly hidden.
     fn set_visible(&self, visible: bool);
 
+    /// Insert the native view into the host window's view hierarchy.
+    ///
+    /// Called from `platform_view_element`'s paint callback on every
+    /// frame; implementations must guard against double-insertion (the
+    /// first successful call inserts, subsequent calls are no-ops).
+    ///
+    /// Default no-op for platforms (e.g. Android) whose view insertion
+    /// happens at view-creation time via their own bridge layer. iOS
+    /// overrides this to add the UIView below the Metal view.
+    fn insert_into_window(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Set the z-order of the native view.
     ///
     /// Higher values are drawn on top. GPUI content rendered after the
@@ -173,6 +186,12 @@ impl PlatformViewHandle {
     /// Show or hide the view.
     pub fn set_visible(&self, visible: bool) {
         self.view.set_visible(visible);
+    }
+
+    /// Insert the underlying native view into the host window's
+    /// view hierarchy. First-call effect; subsequent calls no-op.
+    pub fn insert_into_window(&self) -> Result<(), String> {
+        self.view.insert_into_window()
     }
 
     /// Set the z-order.

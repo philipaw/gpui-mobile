@@ -636,6 +636,16 @@ impl IosWindow {
             let scale: core_graphics::base::CGFloat = msg_send![screen_obj, scale];
             let _: () = msg_send![layer, setContentsScale: scale];
 
+            // Mark the Metal view + layer non-opaque so a below-Metal subview
+            // (platform_view: WKWebView, AVPlayerLayer, etc., inserted via
+            // `IosPlatformView::insert_into_window`) can composite through
+            // the scene paint's alpha hole-punch. Necessary but not
+            // sufficient — the GPUI scene paint itself must also leave
+            // alpha < 1 in the platform-view bbox region; that's the step
+            // 1.5 hole-punch follow-up.
+            let _: () = msg_send![view, setOpaque: false];
+            let _: () = msg_send![layer, setOpaque: false];
+
             // Auto-resize the Metal view when the parent view changes size
             // (e.g. rotation). UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight
             let _: () = msg_send![view, setAutoresizingMask: 18_usize]; // 0x02 | 0x10
@@ -845,6 +855,12 @@ impl IosWindow {
     }
 
     /// Get the raw pointer to the UIViewController.
+    ///
+    /// Kept for downstream use even though the step-1 platform_view
+    /// path uses `metal_view_ptr().superview` (the UIWindow) directly
+    /// — future scaffolds that compose into the VC's content view
+    /// (rather than alongside the Metal view) will need this.
+    #[allow(dead_code)]
     pub fn view_controller_ptr(&self) -> *mut AnyObject {
         self.view_controller
     }
