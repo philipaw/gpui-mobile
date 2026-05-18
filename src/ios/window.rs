@@ -777,7 +777,18 @@ impl IosWindow {
             // WgpuContext with that instance, and finally create the renderer.
             let config = WgpuSurfaceConfig {
                 size: size(DevicePixels(pixel_w), DevicePixels(pixel_h)),
-                transparent: false,
+                // Required for below-Metal platform_view composition
+                // (§17.8 step-1.5). Selects a non-`Opaque`
+                // `CompositeAlphaMode` (iOS sim's surface advertises
+                // `[Opaque, PostMultiplied]`; matching gpui_wgpu
+                // patch adds `PostMultiplied` to the transparent_alpha_mode
+                // picker preferences) so the iOS compositor honors the
+                // CAMetalLayer's per-pixel alpha. The main render pass
+                // already clears the drawable to
+                // `wgpu::Color::TRANSPARENT`, so unpainted regions
+                // reveal whatever's below the Metal view — i.e. the
+                // platform-view subview inserted in step 1.
+                transparent: true,
                 preferred_present_mode: None,
             };
 
