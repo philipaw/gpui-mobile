@@ -154,10 +154,13 @@ impl IosPlatformView {
                         msg_send![class!(AVPlayerLayer), playerLayerWithPlayer: player_ptr];
                     if !player_layer.is_null() {
                         let _: () = msg_send![player_layer, setFrame: frame];
-                        // Set video gravity to aspect fit
+                        // Set video gravity to aspect fit. `make_nsstring`
+                        // returns an AUTORELEASED NSString — do not
+                        // `release` it (double-release fault during
+                        // autorelease pool drain, EXC_BAD_ACCESS in
+                        // `objc_release`).
                         let gravity = Self::make_nsstring("AVLayerVideoGravityResizeAspect");
                         let _: () = msg_send![player_layer, setVideoGravity: gravity];
-                        let _: () = msg_send![gravity, release];
                         let view_layer: *mut AnyObject = msg_send![view, layer];
                         let _: () = msg_send![view_layer, addSublayer: player_layer];
                     }
@@ -198,7 +201,8 @@ impl IosPlatformView {
             return Err("Failed to create WKWebView".into());
         }
 
-        // Load URL or HTML if provided
+        // Load URL or HTML if provided. `make_nsstring` returns
+        // autoreleased; do not `release` (over-release otherwise).
         if let Some(url) = params.creation_params.get("url") {
             if !url.is_empty() {
                 let ns_url_str = Self::make_nsstring(url);
@@ -208,7 +212,6 @@ impl IosPlatformView {
                         msg_send![class!(NSURLRequest), requestWithURL: nsurl];
                     let _: *mut AnyObject = msg_send![webview, loadRequest: request];
                 }
-                let _: () = msg_send![ns_url_str, release];
             }
         } else if let Some(html) = params.creation_params.get("html") {
             if !html.is_empty() {
@@ -216,7 +219,6 @@ impl IosPlatformView {
                 let base_url: *mut AnyObject = std::ptr::null_mut();
                 let _: *mut AnyObject =
                     msg_send![webview, loadHTMLString: ns_html, baseURL: base_url];
-                let _: () = msg_send![ns_html, release];
             }
         }
 
@@ -248,9 +250,10 @@ impl IosPlatformView {
                     let layer: *mut AnyObject = msg_send![layer, initWithSession: session_ptr];
                     if !layer.is_null() {
                         let _: () = msg_send![layer, setFrame: frame];
+                        // `make_nsstring` returns autoreleased; don't
+                        // manually `release` (would over-release).
                         let gravity = Self::make_nsstring("AVLayerVideoGravityResizeAspectFill");
                         let _: () = msg_send![layer, setVideoGravity: gravity];
-                        let _: () = msg_send![gravity, release];
                         let view_layer: *mut AnyObject = msg_send![view, layer];
                         let _: () = msg_send![view_layer, addSublayer: layer];
                     }
@@ -404,6 +407,20 @@ impl IosPlatformView {
     }
 
     /// Update the native view's frame.
+    ///
+    /// Also resizes every sublayer of the view's CALayer to match
+    /// the new bounds (origin-zero, since sublayer frames are in
+    /// superlayer coordinates). CALayer on iOS does NOT honor
+    /// `autoresizingMask` (that property is macOS-only), so e.g.
+    /// the `AVPlayerLayer` added by `create_video_player_view` and
+    /// the `AVCaptureVideoPreviewLayer` added by
+    /// `create_camera_preview_view` would otherwise stay frozen at
+    /// their initial-creation size (the `bounds.width/height`
+    /// passed to `IosPlatformView::new`) while the outer UIView
+    /// grew to the gpui-computed widget rect. Symptom: the video /
+    /// camera surface renders at 1×1 (or whatever the seed size
+    /// was) in the top-left of the visible UIView while the rest
+    /// of the bbox stays dark.
     #[cfg(target_os = "ios")]
     fn update_native_frame(&self, bounds: &PlatformViewBounds) {
         let view = *self.native_view.lock().unwrap();
@@ -418,6 +435,22 @@ impl IosPlatformView {
                 bounds.height as f64,
             );
             let _: () = msg_send![view, setFrame: frame];
+
+            let sublayer_frame =
+                ObjcCGRect::new(0.0, 0.0, bounds.width as f64, bounds.height as f64);
+            let view_layer: *mut AnyObject = msg_send![view, layer];
+            if !view_layer.is_null() {
+                let sublayers: *mut AnyObject = msg_send![view_layer, sublayers];
+                if !sublayers.is_null() {
+                    let count: usize = msg_send![sublayers, count];
+                    for i in 0..count {
+                        let sub: *mut AnyObject = msg_send![sublayers, objectAtIndex: i];
+                        if !sub.is_null() {
+                            let _: () = msg_send![sub, setFrame: sublayer_frame];
+                        }
+                    }
+                }
+            }
         }
     }
 }

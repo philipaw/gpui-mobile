@@ -70,37 +70,59 @@ pub fn get_player_ptr(id: u32) -> Option<*mut AnyObject> {
 
 pub fn set_url(id: u32, url: &str) -> Result<VideoInfo, String> {
     with_player(id, |entry| unsafe {
+        // `make_nsstring` returns an AUTORELEASED NSString — do not
+        // `release` it manually. Earlier the code did, which
+        // double-released and SIGSEGV'd in `objc_release` during the
+        // next autorelease pool drain.
         let url_str = make_nsstring(url);
         let nsurl: *mut AnyObject = msg_send![class!(NSURL), URLWithString: url_str];
         if nsurl.is_null() {
-            let _: () = msg_send![url_str, release];
             return Err("Invalid URL".into());
         }
 
         let item: *mut AnyObject = msg_send![class!(AVPlayerItem), playerItemWithURL: nsurl];
         let _: () = msg_send![entry.player, replaceCurrentItemWithPlayerItem: item];
-        let _: () = msg_send![url_str, release];
 
-        wait_for_item_ready(entry.player)?;
-        get_video_info(entry.player)
+        // AVPlayerItem loads asynchronously via the AVPlayer's
+        // internal queue; we return immediately rather than busy-
+        // waiting on `AVPlayerItem.status`. The prior wait pattern
+        // deadlocked when called from the main thread (AVFoundation's
+        // KVO callbacks fire on the main thread, which the wait was
+        // blocking). Also: reading `duration` / `presentationSize`
+        // off a not-yet-ready AVPlayerItem via `msg_send!` panics
+        // because the CMTime ABI returns garbage flags. So we return
+        // a zero-valued `VideoInfo` here — callers should poll
+        // `duration(id)` / `video_size(id)` once playback has started.
+        // For the AVPlayerLayer-driven platform_view path neither
+        // value is required: the layer renders frames as soon as
+        // decode catches up.
+        Ok(VideoInfo {
+            duration_ms: 0,
+            width: 0,
+            height: 0,
+        })
     })
 }
 
 pub fn set_file_path(id: u32, path: &str) -> Result<VideoInfo, String> {
     with_player(id, |entry| unsafe {
+        // See `set_url` — autoreleased NSString; no manual `release`.
         let path_str = make_nsstring(path);
         let nsurl: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: path_str];
         if nsurl.is_null() {
-            let _: () = msg_send![path_str, release];
             return Err("Invalid file path".into());
         }
 
         let item: *mut AnyObject = msg_send![class!(AVPlayerItem), playerItemWithURL: nsurl];
         let _: () = msg_send![entry.player, replaceCurrentItemWithPlayerItem: item];
-        let _: () = msg_send![path_str, release];
 
-        wait_for_item_ready(entry.player)?;
-        get_video_info(entry.player)
+        // See `set_url` above — AVPlayerItem loads asynchronously;
+        // no main-thread sync-wait, and no early VideoInfo probe.
+        Ok(VideoInfo {
+            duration_ms: 0,
+            width: 0,
+            height: 0,
+        })
     })
 }
 
@@ -291,26 +313,15 @@ unsafe fn make_nsstring(s: &str) -> *mut AnyObject {
     crate::ios::util::nsstring(s)
 }
 
-/// Wait (up to 5 seconds) for the current AVPlayerItem to reach ReadyToPlay status.
-unsafe fn wait_for_item_ready(player: *mut AnyObject) -> Result<(), String> {
-    let item: *mut AnyObject = msg_send![player, currentItem];
-    if item.is_null() {
-        return Err("No player item".into());
-    }
-
-    // AVPlayerItemStatus: 0 = Unknown, 1 = ReadyToPlay, 2 = Failed
-    for _ in 0..100 {
-        let status: i64 = msg_send![item, status];
-        match status {
-            1 => return Ok(()),
-            2 => return Err("AVPlayerItem failed to load".into()),
-            _ => std::thread::sleep(std::time::Duration::from_millis(50)),
-        }
-    }
-    Err("Timed out waiting for AVPlayerItem to become ready".into())
-}
-
-/// Extract video info from the current player item.
+/// Extract video info from the current player item. Caller is
+/// responsible for ensuring the item has reached `ReadyToPlay`
+/// (status == 1) — reading `duration` / `presentationSize` off an
+/// item still in the `Unknown` status panics via the CMTime msg_send
+/// ABI. Currently unused (set_url / set_file_path return zero-valued
+/// VideoInfo and let callers poll `duration` / `video_size` later),
+/// but kept around as a building block for a future async/ready-aware
+/// info path.
+#[allow(dead_code)]
 unsafe fn get_video_info(player: *mut AnyObject) -> Result<VideoInfo, String> {
     let item: *mut AnyObject = msg_send![player, currentItem];
     if item.is_null() {
