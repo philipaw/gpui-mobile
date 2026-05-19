@@ -17,6 +17,13 @@ use objc2::{class, msg_send};
 #[cfg(target_os = "ios")]
 use super::cg_types::ObjcCGRect;
 
+/// View type for the s56 zero-copy CMSampleBuffer path. Creates a
+/// UIView containing an `AVSampleBufferDisplayLayer` sublayer + a
+/// `CMTimebase` for vsync-aligned video playback. Callers enqueue
+/// `CMSampleBuffer`s via `PlatformView::enqueue_sample_buffer` and
+/// flush on loop-reopen via `PlatformView::flush_sample_buffer_layer`.
+pub const VIEW_TYPE_SAMPLE_BUFFER_DISPLAY: &str = "sample_buffer_display";
+
 /// iOS implementation of a platform view.
 ///
 /// Wraps a `UIView` instance. The view is created during construction but
@@ -38,6 +45,21 @@ pub struct IosPlatformView {
     /// Whether this view has been inserted into the window's view hierarchy.
     inserted: AtomicBool,
     bounds: std::sync::Mutex<PlatformViewBounds>,
+    /// Pointer to a sublayer that needs specialised handling.
+    /// Currently only populated for `view_type = "sample_buffer_display"`,
+    /// where it points at the `AVSampleBufferDisplayLayer` added below
+    /// the UIView's main layer. Null otherwise. Retained via the
+    /// sublayer chain — UIView's layer owns it.
+    #[cfg(target_os = "ios")]
+    aux_layer: std::sync::Mutex<*mut AnyObject>,
+    /// Manually-driven `CMTimebase` controlling
+    /// `AVSampleBufferDisplayLayer`'s playback clock for the sample-
+    /// buffer view type. Reset to PTS=0 on each loop reopen so
+    /// PTS=0 buffers in a fresh decode pass match the timebase's
+    /// "now". Strong reference held in this `Retained<>` — released
+    /// on dispose. Null/uninitialised for other view types.
+    #[cfg(target_os = "ios")]
+    timebase: std::sync::Mutex<Option<objc2::rc::Retained<objc2_core_media::CMTimebase>>>,
 }
 
 // Safety: UIView operations are dispatched to the main thread.
@@ -56,6 +78,27 @@ impl IosPlatformView {
 
         let native_view = Self::create_native_view(view_type, &params.bounds, params)?;
 
+        // Probe for the sample-buffer sublayer + create its
+        // controlling timebase if this is a sample_buffer_display
+        // view. Generic / video_player / webview / camera_preview
+        // views leave these unset.
+        #[cfg(target_os = "ios")]
+        let (aux_layer, timebase) = if view_type == VIEW_TYPE_SAMPLE_BUFFER_DISPLAY {
+            unsafe {
+                let layer = find_sublayer_of_class(native_view, "AVSampleBufferDisplayLayer");
+                let tb = make_host_timebase().ok();
+                if let (Some(tb_ref), false) = (tb.as_ref(), layer.is_null()) {
+                    let _: () = msg_send![
+                        layer,
+                        setControlTimebase: &**tb_ref as *const _ as *mut AnyObject
+                    ];
+                }
+                (layer, tb)
+            }
+        } else {
+            (std::ptr::null_mut(), None)
+        };
+
         Ok(Self {
             id,
             view_type: view_type.to_string(),
@@ -63,6 +106,10 @@ impl IosPlatformView {
             disposed: AtomicBool::new(false),
             inserted: AtomicBool::new(false),
             bounds: std::sync::Mutex::new(params.bounds),
+            #[cfg(target_os = "ios")]
+            aux_layer: std::sync::Mutex::new(aux_layer),
+            #[cfg(target_os = "ios")]
+            timebase: std::sync::Mutex::new(timebase),
         })
     }
 
@@ -91,6 +138,9 @@ impl IosPlatformView {
                 "video_player" => Self::create_video_player_view(frame, params)?,
                 "webview" => Self::create_webview_view(frame, params)?,
                 "camera_preview" => Self::create_camera_preview_view(frame, params)?,
+                VIEW_TYPE_SAMPLE_BUFFER_DISPLAY => {
+                    Self::create_sample_buffer_display_view(frame)?
+                }
                 _ => Self::create_generic_view(frame)?,
             };
 
@@ -239,6 +289,47 @@ impl IosPlatformView {
         }
 
         Ok(webview)
+    }
+
+    /// Create a UIView with an `AVSampleBufferDisplayLayer` sublayer.
+    /// The sublayer's `enqueueSampleBuffer:` API schedules frames for
+    /// vsync-aligned display using each `CMSampleBuffer`'s PTS;
+    /// drives smooth video playback off raw decoded buffers without
+    /// going through `AVPlayer`. Paired with a manually-driven
+    /// `CMTimebase` (set up in `new`) so PTS=0 in a fresh decode
+    /// pass aligns with timebase-time=0.
+    #[cfg(target_os = "ios")]
+    unsafe fn create_sample_buffer_display_view(
+        frame: ObjcCGRect,
+    ) -> Result<*mut AnyObject, String> {
+        let uiview_class = class!(UIView);
+        let view: *mut AnyObject = msg_send![uiview_class, alloc];
+        let view: *mut AnyObject = msg_send![view, initWithFrame: frame];
+        if view.is_null() {
+            return Err("Failed to create UIView for sample_buffer_display".into());
+        }
+        let clear_color: *mut AnyObject = msg_send![class!(UIColor), clearColor];
+        let _: () = msg_send![view, setBackgroundColor: clear_color];
+
+        let layer: *mut AnyObject = msg_send![class!(AVSampleBufferDisplayLayer), alloc];
+        let layer: *mut AnyObject = msg_send![layer, init];
+        if layer.is_null() {
+            return Err("Failed to create AVSampleBufferDisplayLayer".into());
+        }
+        let sublayer_frame =
+            ObjcCGRect::new(0.0, 0.0, frame.width, frame.height);
+        let _: () = msg_send![layer, setFrame: sublayer_frame];
+        // `resize` (the literal value of `AVLayerVideoGravityResize`,
+        // also valid as a CALayer contentsGravity) — the layer
+        // stretches the video to fill the bounds. Spike scene uses
+        // 4:3-ish bounds matching the source aspect, so this looks
+        // identical to `resizeAspect` in practice.
+        let gravity = Self::make_nsstring("resize");
+        let _: () = msg_send![layer, setVideoGravity: gravity];
+        let view_layer: *mut AnyObject = msg_send![view, layer];
+        let _: () = msg_send![view_layer, addSublayer: layer];
+
+        Ok(view)
     }
 
     /// Create a UIView with AVCaptureVideoPreviewLayer for camera preview.
@@ -565,6 +656,108 @@ impl PlatformView for IosPlatformView {
     fn is_disposed(&self) -> bool {
         self.disposed.load(Ordering::Relaxed)
     }
+
+    /// Enqueue a `CMSampleBuffer` for vsync-aligned display on the
+    /// view's `AVSampleBufferDisplayLayer` sublayer. No-op for other
+    /// view types (where `aux_layer` is null). Caller retains the
+    /// CMSampleBuffer; the layer holds its own reference internally.
+    fn enqueue_sample_buffer(&self, sample_buffer: *mut std::ffi::c_void) {
+        if self.disposed.load(Ordering::Relaxed) || sample_buffer.is_null() {
+            return;
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let layer = *self.aux_layer.lock().unwrap();
+            if layer.is_null() {
+                return;
+            }
+            unsafe {
+                let _: () = msg_send![
+                    layer,
+                    enqueueSampleBuffer: sample_buffer as *mut AnyObject
+                ];
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = sample_buffer;
+        }
+    }
+
+    /// Flush queued buffers + reset the controlling `CMTimebase` to
+    /// PTS=0. Call when looping decoder back to the start so the
+    /// timebase doesn't drift past the next loop pass's frames.
+    fn flush_sample_buffer_layer(&self) {
+        if self.disposed.load(Ordering::Relaxed) {
+            return;
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let layer = *self.aux_layer.lock().unwrap();
+            if !layer.is_null() {
+                unsafe {
+                    let _: () = msg_send![layer, flush];
+                }
+            }
+            if let Some(tb) = self.timebase.lock().unwrap().as_ref() {
+                reset_timebase_to_zero(tb);
+            }
+        }
+    }
+
+    /// Set `view.layer.contents` to the given IOSurface for zero-copy
+    /// display (decoded video frames, externally-rendered Metal
+    /// content, etc.). Caller retains the IOSurface; CALayer holds
+    /// its own reference internally.
+    ///
+    /// `surface` is an `IOSurfaceRef` (`__IOSurface*` after toll-free
+    /// bridging). Pass null to clear. On first call we also set
+    /// `contentsGravity = resize` so the surface fills the layer
+    /// regardless of its native pixel size, plus
+    /// `masksToBounds = true` so non-rectangular clips don't bleed.
+    fn set_iosurface_contents(&self, surface: *mut std::ffi::c_void) {
+        if self.disposed.load(Ordering::Relaxed) {
+            return;
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let view = *self.native_view.lock().unwrap();
+            if view.is_null() {
+                return;
+            }
+            unsafe {
+                let layer: *mut AnyObject = msg_send![view, layer];
+                if layer.is_null() {
+                    return;
+                }
+                // Wrap in CATransaction with implicit actions
+                // disabled, otherwise Core Animation crossfades
+                // every `contents` change with its default 0.25 s
+                // CABasicAnimation. For video playback (30 fps =
+                // ~33 ms per frame) that means every new frame
+                // overlaps the previous frame's still-running
+                // fade-out → visible jitter / ghosting. Observed
+                // 2026-05-19 on iPhone 16 Pro Max during s56's
+                // IOSurface zero-copy verdict.
+                let ca_tx = class!(CATransaction);
+                let _: () = msg_send![ca_tx, begin];
+                let _: () = msg_send![ca_tx, setDisableActions: true];
+                let _: () =
+                    msg_send![layer, setContents: surface as *mut AnyObject];
+                // Idempotent layer config — cheap enough to set every
+                // frame; setting once on first non-null contents is a
+                // future optimisation if profiling demands it.
+                let gravity = Self::make_nsstring("resize");
+                let _: () = msg_send![layer, setContentsGravity: gravity];
+                let _: () = msg_send![layer, setMasksToBounds: true];
+                let _: () = msg_send![ca_tx, commit];
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            let _ = surface;
+        }
+    }
 }
 
 /// iOS platform view factory.
@@ -577,6 +770,111 @@ impl IosPlatformViewFactory {
         Self {
             view_type: view_type.to_string(),
         }
+    }
+}
+
+/// Walk a UIView's CALayer sublayers and return the first one whose
+/// Obj-C class name matches `class_name`. Used to extract the
+/// `AVSampleBufferDisplayLayer` we added during view creation so
+/// later `enqueue_sample_buffer` calls hit the right layer without
+/// rescanning every time (the result is cached in `aux_layer`).
+/// Returns null if no match.
+#[cfg(target_os = "ios")]
+unsafe fn find_sublayer_of_class(view: *mut AnyObject, class_name: &str) -> *mut AnyObject {
+    use objc2::runtime::AnyClass;
+    if view.is_null() {
+        return std::ptr::null_mut();
+    }
+    let view_layer: *mut AnyObject = msg_send![view, layer];
+    if view_layer.is_null() {
+        return std::ptr::null_mut();
+    }
+    let sublayers: *mut AnyObject = msg_send![view_layer, sublayers];
+    if sublayers.is_null() {
+        return std::ptr::null_mut();
+    }
+    let count: usize = msg_send![sublayers, count];
+    for i in 0..count {
+        let layer: *mut AnyObject = msg_send![sublayers, objectAtIndex: i];
+        if layer.is_null() {
+            continue;
+        }
+        let cls_ptr: *const AnyClass = msg_send![layer, class];
+        if cls_ptr.is_null() {
+            continue;
+        }
+        let name = (&*cls_ptr).name();
+        if name.to_string_lossy() == class_name {
+            return layer;
+        }
+    }
+    std::ptr::null_mut()
+}
+
+// `CMTimebaseCreateWithSourceClock` isn't bound by objc2-core-media
+// 0.3.2 (it's marked TODO in the generated code). Declare the C
+// signature directly. CoreMedia.framework is already linked
+// transitively via other AVFoundation msg_send paths.
+#[cfg(target_os = "ios")]
+unsafe extern "C" {
+    fn CMTimebaseCreateWithSourceClock(
+        allocator: *mut std::ffi::c_void,
+        source_clock: *const objc2_core_media::CMClock,
+        timebase_out: *mut *mut objc2_core_media::CMTimebase,
+    ) -> i32;
+}
+
+/// Create a host-time-clock-backed `CMTimebase` running at rate 1.0
+/// from time 0. `AVSampleBufferDisplayLayer.controlTimebase` reads
+/// this to schedule sample-buffer display against the timebase's
+/// clock — so PTS=0 in our newly-opened AvfDecoder aligns with
+/// timebase-time=0 (= now-at-view-creation). On loop reopen we
+/// reset the timebase to 0 again via `reset_timebase_to_zero`.
+#[cfg(target_os = "ios")]
+unsafe fn make_host_timebase() -> Result<objc2::rc::Retained<objc2_core_media::CMTimebase>, String>
+{
+    use objc2_core_media::{CMClock, CMTime, CMTimeFlags, CMTimebase};
+
+    let host_clock = CMClock::host_time_clock();
+    let mut tb_out: *mut CMTimebase = std::ptr::null_mut();
+    let status = CMTimebaseCreateWithSourceClock(
+        std::ptr::null_mut(),
+        &*host_clock,
+        &mut tb_out,
+    );
+    if status != 0 || tb_out.is_null() {
+        return Err(format!("CMTimebaseCreateWithSourceClock status={status}"));
+    }
+    // CMTimebaseCreate returns +1 retained (CF "Create" rule).
+    let tb = objc2::rc::Retained::from_raw(tb_out)
+        .ok_or_else(|| "CMTimebase Retained::from_raw nil".to_string())?;
+    // Initial state: time=0, rate=1 (playback proceeds at 1× host
+    // clock rate from PTS=0).
+    let zero = CMTime {
+        value: 0,
+        timescale: 1_000_000,
+        flags: CMTimeFlags::Valid,
+        epoch: 0,
+    };
+    let _ = tb.set_time(zero);
+    let _ = tb.set_rate(1.0);
+    Ok(tb)
+}
+
+/// Reset a `CMTimebase` to time=0 + rate=1. Used at loop-reopen so
+/// the newly-decoded frames (PTS starting at 0 again) land at the
+/// scheduler's "now" rather than "in the past".
+#[cfg(target_os = "ios")]
+fn reset_timebase_to_zero(tb: &objc2_core_media::CMTimebase) {
+    let zero = objc2_core_media::CMTime {
+        value: 0,
+        timescale: 1_000_000,
+        flags: objc2_core_media::CMTimeFlags::Valid,
+        epoch: 0,
+    };
+    unsafe {
+        let _ = tb.set_time(zero);
+        let _ = tb.set_rate(1.0);
     }
 }
 

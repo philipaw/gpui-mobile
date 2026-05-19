@@ -93,6 +93,14 @@ core-graphics       = "0.24"
 core-text           = "=21.0.0"
 uuid                = { version = "1", features = ["v4", "v5"] }
 block2              = "0.6"
+# objc2-typed wrappers used for the s56 sample_buffer_display path:
+# `CMTimebase` controls AVSampleBufferDisplayLayer's playback clock.
+# Existing UIKit / AVFoundation calls stay on `msg_send!` since
+# they don't benefit from typed shims at the spike layer.
+objc2-core-foundation = { version = "0.3", features = ["CFBase"] }
+objc2-core-media      = { version = "0.3", features = [
+    "CMTime", "CMSync", "CMBase", "CMSampleBuffer",
+] }
 
 # wgpu renderer (Metal backend on iOS/Android)
 gpui_wgpu = { git = "https://github.com/philipaw/zed", branch = "gem/a11y-element-trait", package = "gpui_wgpu", features = ["font-kit"] }

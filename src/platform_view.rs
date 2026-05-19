@@ -125,6 +125,42 @@ pub trait PlatformView: Send + Sync {
 
     /// Whether the view is currently disposed.
     fn is_disposed(&self) -> bool;
+
+    /// Set the view's CALayer (or platform equivalent) to display the
+    /// given IOSurface zero-copy. iOS overrides this to set
+    /// `view.layer.contents = surface`; other platforms no-op.
+    ///
+    /// `surface` is an `IOSurfaceRef` (CoreFoundation type) cast to
+    /// `*mut c_void`. Caller retains ownership; the view internally
+    /// holds a reference (CALayer retains its `contents` value).
+    /// Pass `null` to clear.
+    ///
+    /// Used by callers driving decoded video frames into a sibling-
+    /// composite CALayer below the Metal view (zero-copy display
+    /// path, distinct from gpui's wgpu sprite atlas). Has a known
+    /// vsync-alignment limit: the layer displays whatever you set
+    /// immediately, no frame-time scheduling. For smooth video
+    /// playback use `enqueue_sample_buffer` instead.
+    fn set_iosurface_contents(&self, _surface: *mut std::ffi::c_void) {}
+
+    /// Enqueue a `CMSampleBuffer` for vsync-aligned video display.
+    /// iOS sample_buffer_display view-type forwards this to an
+    /// `AVSampleBufferDisplayLayer`'s `enqueueSampleBuffer:` —
+    /// the layer schedules each buffer for display at its PTS,
+    /// driven by a `CMTimebase` set up at view creation. Other
+    /// view types + other platforms no-op.
+    ///
+    /// `sample_buffer` is a `CMSampleBufferRef`. Caller retains;
+    /// the layer holds its own reference internally.
+    fn enqueue_sample_buffer(&self, _sample_buffer: *mut std::ffi::c_void) {}
+
+    /// Flush queued sample buffers + reset the controlling
+    /// `CMTimebase` to PTS=0. Call when looping decoder back to
+    /// the start of a clip so the timebase doesn't drift past the
+    /// next loop pass's frame PTSs (otherwise all newly-enqueued
+    /// frames would be "in the past" and AVSampleBufferDisplayLayer
+    /// would display them immediately = fast-forward).
+    fn flush_sample_buffer_layer(&self) {}
 }
 
 /// Factory for creating platform views of a specific type.
@@ -210,6 +246,21 @@ impl PlatformViewHandle {
     pub fn dispose(&self) {
         PlatformViewRegistry::global().remove_view(self.view.id());
         self.view.dispose();
+    }
+
+    /// Pass-through to `PlatformView::set_iosurface_contents`.
+    pub fn set_iosurface_contents(&self, surface: *mut std::ffi::c_void) {
+        self.view.set_iosurface_contents(surface);
+    }
+
+    /// Pass-through to `PlatformView::enqueue_sample_buffer`.
+    pub fn enqueue_sample_buffer(&self, sample_buffer: *mut std::ffi::c_void) {
+        self.view.enqueue_sample_buffer(sample_buffer);
+    }
+
+    /// Pass-through to `PlatformView::flush_sample_buffer_layer`.
+    pub fn flush_sample_buffer_layer(&self) {
+        self.view.flush_sample_buffer_layer();
     }
 }
 
