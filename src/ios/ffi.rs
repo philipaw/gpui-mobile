@@ -518,7 +518,29 @@ pub fn run_app() {
     }
 
     let platform = Rc::new(super::IosPlatform::new());
-    let mut app = Application::with_platform(platform);
+    // Wire a real HTTP client so `gpui::img(uri)` (and any other
+    // URL-sourced asset) actually fetches. Without this gpui defaults
+    // to `FakeHttpClient::with_404_response` and every URL silently
+    // 404s — banked in gem's §17.8 from the s50 YouTube poster work.
+    // `reqwest_client::ReqwestClient` spins up a 1-thread tokio
+    // runtime + reqwest+rustls; same impl zed itself uses.
+    //
+    // Use `proxy_and_user_agent` (not `new`) because `new` configures
+    // reqwest with bare `use_rustls_tls()` which gives rustls no CA
+    // roots — every HTTPS request fails with
+    // `invalid peer certificate: UnknownIssuer`.
+    // `proxy_and_user_agent` routes through
+    // `http_client_tls::tls_config()` which sets up
+    // `rustls-platform-verifier`, hitting iOS's system trust store.
+    let http_client: std::sync::Arc<dyn gpui::http_client::HttpClient> =
+        std::sync::Arc::new(
+            reqwest_client::ReqwestClient::proxy_and_user_agent(
+                None,
+                "gpui-mobile/0.1",
+            )
+            .expect("ReqwestClient::proxy_and_user_agent"),
+        );
+    let mut app = Application::with_platform(platform).with_http_client(http_client);
     // `run_until(&mut self, ...)` (gpui core, philipaw/zed @ bb5281fa7d+):
     // the `&mut self` shape lets us hold `app` past the run callback,
     // which Platform::run on iOS returns from immediately. Plain `run`
