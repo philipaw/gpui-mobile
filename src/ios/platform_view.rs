@@ -216,7 +216,23 @@ impl IosPlatformView {
         } else if let Some(html) = params.creation_params.get("html") {
             if !html.is_empty() {
                 let ns_html = Self::make_nsstring(html);
-                let base_url: *mut AnyObject = std::ptr::null_mut();
+                // If a base_url creation_param is provided, build an
+                // NSURL from it and pass as baseURL: — critical for
+                // embedding services that reject iframes loaded from
+                // a null origin (e.g. YouTube returns "Error 153
+                // Video player configuration error" without one).
+                let base_url: *mut AnyObject = match params
+                    .creation_params
+                    .get("base_url")
+                {
+                    Some(s) if !s.is_empty() => {
+                        let ns_base_str = Self::make_nsstring(s);
+                        let url: *mut AnyObject =
+                            msg_send![class!(NSURL), URLWithString: ns_base_str];
+                        url
+                    }
+                    _ => std::ptr::null_mut(),
+                };
                 let _: *mut AnyObject =
                     msg_send![webview, loadHTMLString: ns_html, baseURL: base_url];
             }

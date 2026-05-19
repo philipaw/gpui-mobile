@@ -33,6 +33,14 @@ pub struct WebViewSettings {
     /// below the top of the screen, leaving room for a GPUI-rendered app bar.
     /// Default: 0.0 (fullscreen).
     pub top_offset: f32,
+    /// Base URL for `load_html` content. Sets the origin / referrer
+    /// the loaded HTML's resources and JS see. Critical for embedding
+    /// services like YouTube that reject iframes loaded from a null
+    /// origin (Error 153) — pass `Some("https://www.youtube.com")`
+    /// when loading HTML that contains a YouTube `<iframe>`. Ignored
+    /// by `load_url` (which has a real URL with its own origin).
+    /// Default: `None` (null base URL).
+    pub base_url: Option<String>,
 }
 
 impl Default for WebViewSettings {
@@ -43,6 +51,7 @@ impl Default for WebViewSettings {
             zoom_enabled: true,
             dom_storage_enabled: true,
             top_offset: 0.0,
+            base_url: None,
         }
     }
 }
@@ -85,6 +94,9 @@ fn settings_to_creation_params(
     );
     if let Some(ref ua) = settings.user_agent {
         params.insert("user_agent".to_string(), ua.clone());
+    }
+    if let Some(ref base) = settings.base_url {
+        params.insert("base_url".to_string(), base.clone());
     }
     params
 }
