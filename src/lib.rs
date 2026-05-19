@@ -152,6 +152,31 @@ type TextInputCallbackFn = Box<dyn FnMut(&str)>;
 /// which in turn calls `drain_pending_text()` and updates the UI.
 pub static TEXT_INPUT_DIRTY: AtomicBool = AtomicBool::new(false);
 
+/// Latest `CADisplayLink.targetTimestamp` (host time in seconds,
+/// same coordinate space as `CACurrentMediaTime`) — written by the
+/// platform's frame callback before invoking `gpui_ios_request_frame`.
+/// Stored as the bit-pattern of f64 in an AtomicU64 so the read can
+/// be lock-free from any thread. `0` means "not yet seeded by the
+/// display-link callback."
+///
+/// Consumers ([`last_display_link_target`]) compare against
+/// `CACurrentMediaTime()` to compute touch→present-time latency
+/// (M0 spike #4 L5 instrumentation, s54).
+pub static LATEST_DISPLAY_LINK_TARGET_BITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Read the last `CADisplayLink.targetTimestamp` seeded by
+/// `gpui_ios_set_display_link_target`. Returns `None` until the
+/// first frame callback has fired.
+pub fn last_display_link_target() -> Option<f64> {
+    let bits = LATEST_DISPLAY_LINK_TARGET_BITS.load(Ordering::Relaxed);
+    if bits == 0 {
+        None
+    } else {
+        Some(f64::from_bits(bits))
+    }
+}
+
 thread_local! {
     /// Global text input callback — set by the active text input component.
     /// When the software keyboard sends text, this callback is invoked.

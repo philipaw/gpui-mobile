@@ -290,6 +290,18 @@ pub extern "C" fn gpui_ios_request_frame(window_ptr: *mut c_void) {
     ffi_panic_guard("gpui_ios_request_frame", || request_frame_inner(window_ptr));
 }
 
+/// Stash the current `CADisplayLink.targetTimestamp` for consumers
+/// to read via [`crate::last_display_link_target`]. Called from the
+/// platform's `CADisplayLink` callback (main.m's `renderFrame`)
+/// before `gpui_ios_request_frame`. M0 spike #4 L5 instrumentation
+/// (s54): host-side code compares this against `CACurrentMediaTime()`
+/// at touch arrival to compute touch→present-time latency.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_set_display_link_target(target_timestamp: f64) {
+    crate::LATEST_DISPLAY_LINK_TARGET_BITS
+        .store(target_timestamp.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
 fn request_frame_inner(window_ptr: *mut c_void) {
     if window_ptr.is_null() {
         return;
