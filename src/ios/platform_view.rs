@@ -88,10 +88,17 @@ impl IosPlatformView {
                 let layer = find_sublayer_of_class(native_view, "AVSampleBufferDisplayLayer");
                 let tb = make_host_timebase().ok();
                 if let (Some(tb_ref), false) = (tb.as_ref(), layer.is_null()) {
-                    let _: () = msg_send![
-                        layer,
-                        setControlTimebase: &**tb_ref as *const _ as *mut AnyObject
-                    ];
+                    // setControlTimebase: takes `CMTimebaseRef`
+                    // (opaque-struct pointer, encoding
+                    // `^{OpaqueCMTimebase=}`). Casting through
+                    // `*mut AnyObject` (encoding `@`) trips objc2's
+                    // debug-build type check — the bug went
+                    // unnoticed on iPhone device in s56 because
+                    // release builds skip the check. Pass the
+                    // raw CMTimebase pointer instead.
+                    let tb_ptr: *const objc2_core_media::CMTimebase = &**tb_ref;
+                    let _: () =
+                        msg_send![layer, setControlTimebase: tb_ptr];
                 }
                 (layer, tb)
             }
@@ -672,10 +679,15 @@ impl PlatformView for IosPlatformView {
                 return;
             }
             unsafe {
-                let _: () = msg_send![
-                    layer,
-                    enqueueSampleBuffer: sample_buffer as *mut AnyObject
-                ];
+                // enqueueSampleBuffer: takes `CMSampleBufferRef`
+                // (`^{opaqueCMSampleBuffer=}`), not an Obj-C
+                // object (`@`). Casting via `*mut AnyObject`
+                // trips objc2's debug-build type check (sim
+                // panics; release-build device skipped the
+                // check, which is why s56 device "worked").
+                let sb_ptr: *const objc2_core_media::CMSampleBuffer =
+                    sample_buffer as *const objc2_core_media::CMSampleBuffer;
+                let _: () = msg_send![layer, enqueueSampleBuffer: sb_ptr];
             }
         }
         #[cfg(not(target_os = "ios"))]
