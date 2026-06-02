@@ -15,6 +15,7 @@ mod events;
 pub mod ffi;
 mod platform;
 pub mod platform_view;
+pub mod stylus;
 mod text_input;
 mod text_system;
 pub mod util;

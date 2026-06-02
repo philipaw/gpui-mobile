@@ -996,6 +996,24 @@ impl IosWindow {
 
         self.mouse_position.set(position);
 
+        // Stylus side-channel: push a raw sample for every UITouch
+        // BEFORE the tap-vs-scroll discriminator below. Canvas-style
+        // hosts drain this queue and consume per-sample pressure /
+        // tilt / Pencil-vs-finger discrimination; finger UIs ignore
+        // it and keep using MouseDown/Move/Up below as before.
+        super::stylus::push(super::stylus::StylusEvent {
+            position_x: logical_x,
+            position_y: logical_y,
+            phase: phase.into(),
+            force: touch_force(touch),
+            altitude: touch_altitude(touch),
+            azimuth: touch_azimuth(touch, self.view),
+            kind: match touch_type_raw(touch) {
+                2 => super::stylus::TouchKind::Pencil,
+                _ => super::stylus::TouchKind::Finger,
+            },
+        });
+
         let mut ts = self.touch_state.get();
 
         let emit = |input: PlatformInput| {

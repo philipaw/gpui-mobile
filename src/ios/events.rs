@@ -71,3 +71,37 @@ pub fn touch_tap_count(touch: *mut AnyObject) -> u32 {
         count as u32
     }
 }
+
+/// `UITouch.force`. Reports `0.0` for fingers on Haptic-Touch hardware
+/// (iPhone 11+); 3D-Touch devices report a value in `0..=max_force`.
+/// Apple Pencil reports its own non-zero scale.
+pub fn touch_force(touch: *mut AnyObject) -> f32 {
+    unsafe {
+        let f: f64 = msg_send![touch, force];
+        f as f32
+    }
+}
+
+/// `UITouch.altitudeAngle`. Radians from the surface to the stylus
+/// (`π/2` = perpendicular / "tip down"). Fingers always report `π/2`.
+pub fn touch_altitude(touch: *mut AnyObject) -> f32 {
+    unsafe {
+        let a: f64 = msg_send![touch, altitudeAngle];
+        a as f32
+    }
+}
+
+/// `UITouch.azimuthAngleInView:`. Radians around the surface normal in
+/// the given view's coordinate system. `0` for fingers.
+pub fn touch_azimuth(touch: *mut AnyObject, view: *mut AnyObject) -> f32 {
+    unsafe {
+        let a: f64 = msg_send![touch, azimuthAngleInView: view];
+        a as f32
+    }
+}
+
+/// `UITouch.type` raw value. UIKit's `UITouchType`: Direct=0,
+/// Indirect=1, Pencil=2, IndirectPointer=3.
+pub fn touch_type_raw(touch: *mut AnyObject) -> i64 {
+    unsafe { msg_send![touch, type] }
+}
