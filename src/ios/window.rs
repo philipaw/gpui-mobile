@@ -251,6 +251,35 @@ fn register_metal_view_class() -> &'static AnyClass {
             handle_pinch_recognizer(this, recognizer);
         }
 
+        // UIRotationGestureRecognizer action target. Same shape as
+        // handle_pinch — fires on every state transition with the
+        // recognizer as sender. Pushes a delta onto the rotation
+        // side-channel queue (see `rotation` module) rather than
+        // emitting a PlatformInput (gpui core has no rotation event).
+        extern "C" fn handle_rotation(
+            this: *mut AnyObject,
+            _sel: Sel,
+            recognizer: *mut AnyObject,
+        ) {
+            handle_rotation_recognizer(this, recognizer);
+        }
+
+        // UIGestureRecognizerDelegate. Returning YES here lets the
+        // pinch and rotation recognizers fire from the *same*
+        // two-finger gesture simultaneously (UIKit's default is to let
+        // only one of a competing pair win). The view is set as the
+        // delegate of both recognizers below. We return YES
+        // unconditionally — the only recognizers we attach are pinch +
+        // rotation, and they're meant to compose.
+        extern "C" fn should_recognize_simultaneously(
+            _this: *mut AnyObject,
+            _sel: Sel,
+            _recognizer: *mut AnyObject,
+            _other: *mut AnyObject,
+        ) -> Bool {
+            Bool::YES
+        }
+
         unsafe {
             // Add class method for layerClass
             decl.add_class_method(
@@ -279,6 +308,15 @@ fn register_metal_view_class() -> &'static AnyClass {
             decl.add_method(
                 sel!(handlePinch:),
                 handle_pinch as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            decl.add_method(
+                sel!(handleRotation:),
+                handle_rotation as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            decl.add_method(
+                sel!(gestureRecognizer:shouldRecognizeSimultaneouslyWithGestureRecognizer:),
+                should_recognize_simultaneously
+                    as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject, *mut AnyObject) -> Bool,
             );
         }
 
@@ -469,6 +507,21 @@ fn handle_pinch_recognizer(view: *mut AnyObject, recognizer: *mut AnyObject) {
         }
         let window = &*(window_ptr as *const IosWindow);
         window.handle_pinch(recognizer);
+    }
+}
+
+/// Route UIRotationGestureRecognizer callbacks to
+/// `IosWindow::handle_rotation`.
+fn handle_rotation_recognizer(view: *mut AnyObject, recognizer: *mut AnyObject) {
+    unsafe {
+        #[allow(deprecated)]
+        let window_ptr: *mut std::ffi::c_void = *(*view).get_ivar(GPUI_WINDOW_IVAR);
+        if window_ptr.is_null() {
+            log::warn!("GPUI iOS: Rotation event but no window pointer set");
+            return;
+        }
+        let window = &*(window_ptr as *const IosWindow);
+        window.handle_rotation(recognizer);
     }
 }
 
@@ -666,7 +719,23 @@ impl IosWindow {
                 msg_send![class!(UIPinchGestureRecognizer), alloc];
             let pinch_recognizer: *mut AnyObject =
                 msg_send![pinch_recognizer, initWithTarget: view, action: sel!(handlePinch:)];
+            // The view is its own UIGestureRecognizerDelegate so pinch +
+            // rotation can fire simultaneously from one two-finger
+            // gesture (see `should_recognize_simultaneously` above).
+            let _: () = msg_send![pinch_recognizer, setDelegate: view];
             let _: () = msg_send![view, addGestureRecognizer: pinch_recognizer];
+
+            // Attach a UIRotationGestureRecognizer alongside the pinch
+            // one so a two-finger twist drives the rotation side-channel
+            // (see `rotation` module). Set the same delegate so it
+            // recognizes simultaneously with pinch — scale + rotate from
+            // a single gesture.
+            let rotation_recognizer: *mut AnyObject =
+                msg_send![class!(UIRotationGestureRecognizer), alloc];
+            let rotation_recognizer: *mut AnyObject =
+                msg_send![rotation_recognizer, initWithTarget: view, action: sel!(handleRotation:)];
+            let _: () = msg_send![rotation_recognizer, setDelegate: view];
+            let _: () = msg_send![view, addGestureRecognizer: rotation_recognizer];
 
             // Set the view as the view controller's view
             let _: () = msg_send![view_controller, setView: view];
@@ -1224,6 +1293,43 @@ impl IosWindow {
                 phase,
             }));
         }
+    }
+
+    /// Handle a UIRotationGestureRecognizer callback. Pushes one
+    /// `RotationEvent` per state transition onto the `rotation`
+    /// side-channel queue. Mirrors `handle_pinch`'s per-event-delta
+    /// contract: read `recognizer.rotation` (cumulative radians since
+    /// the last reset) and reset it back to 0.0, so each pushed `delta`
+    /// is the incremental twist. gpui core has no rotation input event,
+    /// so this never emits a `PlatformInput` — host apps drain the
+    /// queue from their render loop.
+    pub fn handle_rotation(&self, recognizer: *mut AnyObject) {
+        // UIGestureRecognizerState raw values:
+        //   0 = Possible, 1 = Began, 2 = Changed,
+        //   3 = Ended, 4 = Cancelled, 5 = Failed
+        let state: i64 = unsafe { msg_send![recognizer, state] };
+        let rotation: f64 = unsafe { msg_send![recognizer, rotation] };
+        let location: ObjcCGPoint =
+            unsafe { msg_send![recognizer, locationInView: self.view] };
+
+        let (phase, delta) = match state {
+            1 => (gpui::TouchPhase::Started, rotation as f32),
+            2 => (gpui::TouchPhase::Moved, rotation as f32),
+            3 | 4 => (gpui::TouchPhase::Ended, rotation as f32),
+            _ => return,
+        };
+
+        // Normalize so the next callback's `rotation` is measured from
+        // 0.0 again — this gives per-event deltas naturally, mirroring
+        // handle_pinch's `setScale: 1.0`.
+        let _: () = unsafe { msg_send![recognizer, setRotation: 0.0_f64] };
+
+        super::rotation::push(super::rotation::RotationEvent {
+            position_x: location.x as f32,
+            position_y: location.y as f32,
+            phase,
+            delta,
+        });
     }
 
     /// Query the safe area insets from the UIView.
