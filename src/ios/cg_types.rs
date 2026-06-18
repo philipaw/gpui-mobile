@@ -71,6 +71,79 @@ impl ObjcCGRect {
     }
 }
 
+// ── CGAffineTransform ──────────────────────────────────────────────────────────
+
+/// objc2-encodable mirror of `CGAffineTransform`.
+///
+/// Layout: six `CGFloat`s `{ a, b, c, d, tx, ty }` representing the
+/// matrix `[ a b 0; c d 0; tx ty 1 ]`. Used to set a `UIView.transform`
+/// (or `CALayer.affineTransform`) for in-place rotation about the view
+/// center — the video-widget rotation path. `transform` rotates about
+/// the view's `center` (default = bbox center), matching how
+/// `paint::build_rotated_quad` rotates a `SolidRect` about its rect
+/// center.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ObjcCGAffineTransform {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub tx: f64,
+    pub ty: f64,
+}
+
+unsafe impl Encode for ObjcCGAffineTransform {
+    const ENCODING: Encoding = Encoding::Struct(
+        "CGAffineTransform",
+        &[
+            Encoding::Double,
+            Encoding::Double,
+            Encoding::Double,
+            Encoding::Double,
+            Encoding::Double,
+            Encoding::Double,
+        ],
+    );
+}
+
+unsafe impl RefEncode for ObjcCGAffineTransform {
+    const ENCODING_REF: Encoding = Encoding::Pointer(&Self::ENCODING);
+}
+
+impl ObjcCGAffineTransform {
+    /// The identity transform — no rotation/scale/translation. Equivalent
+    /// to `CGAffineTransformIdentity`; restoring this un-rotates a view.
+    pub fn identity() -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        }
+    }
+
+    /// A pure rotation by `radians`, matching `CGAffineTransformMakeRotation`:
+    /// `[ cos sin 0; -sin cos 0; 0 0 1 ]`. In UIKit's y-down view space this
+    /// rotates the same direction as `paint::build_rotated_quad` /
+    /// `paint::rotate_points_around_center` (both y-down screen rotations
+    /// `(dx·cosθ − dy·sinθ, dx·sinθ + dy·cosθ)`), so a rotated video spins
+    /// the same way as a `SolidRect`/image at the same `rot`.
+    pub fn rotation(radians: f64) -> Self {
+        let (s, c) = radians.sin_cos();
+        Self {
+            a: c,
+            b: s,
+            c: -s,
+            d: c,
+            tx: 0.0,
+            ty: 0.0,
+        }
+    }
+}
+
 // ── CGPoint ───────────────────────────────────────────────────────────────────
 
 /// objc2-encodable mirror of `core_graphics::geometry::CGPoint`.

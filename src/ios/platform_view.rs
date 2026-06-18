@@ -15,7 +15,7 @@ use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
 
 #[cfg(target_os = "ios")]
-use super::cg_types::ObjcCGRect;
+use super::cg_types::{ObjcCGAffineTransform, ObjcCGPoint, ObjcCGRect};
 
 /// View type for the s56 zero-copy CMSampleBuffer path. Creates a
 /// UIView containing an `AVSampleBufferDisplayLayer` sublayer + a
@@ -45,6 +45,14 @@ pub struct IosPlatformView {
     /// Whether this view has been inserted into the window's view hierarchy.
     inserted: AtomicBool,
     bounds: std::sync::Mutex<PlatformViewBounds>,
+    /// Rotation about the view center, in radians. Applied as a
+    /// `CGAffineTransform` on the hosted `UIView` and re-applied on
+    /// every `update_native_frame` (the per-paint `set_bounds` call)
+    /// so the transform isn't clobbered by the frame update. `0.0`
+    /// keeps the legacy axis-aligned `setFrame:` path (byte-for-byte
+    /// unchanged). Stored as `f64` for the trig in
+    /// `ObjcCGAffineTransform::rotation`.
+    rotation: std::sync::Mutex<f64>,
     /// Pointer to a sublayer that needs specialised handling.
     /// Currently only populated for `view_type = "sample_buffer_display"`,
     /// where it points at the `AVSampleBufferDisplayLayer` added below
@@ -113,6 +121,7 @@ impl IosPlatformView {
             disposed: AtomicBool::new(false),
             inserted: AtomicBool::new(false),
             bounds: std::sync::Mutex::new(params.bounds),
+            rotation: std::sync::Mutex::new(0.0),
             #[cfg(target_os = "ios")]
             aux_layer: std::sync::Mutex::new(aux_layer),
             #[cfg(target_os = "ios")]
@@ -535,20 +544,57 @@ impl IosPlatformView {
     /// camera surface renders at 1×1 (or whatever the seed size
     /// was) in the top-left of the visible UIView while the rest
     /// of the bbox stays dark.
+    ///
+    /// When `rotation != 0` the view is positioned via `bounds` +
+    /// `center` + `transform` instead of `setFrame:` — UIKit's `frame`
+    /// is undefined while a non-identity `transform` is set (it returns
+    /// the *rotated* bounding box, and setting it back would fight the
+    /// transform). The `CGAffineTransform` rotates the UIView about its
+    /// `center` (which we pin to the widget-rect center in superview
+    /// coordinates), matching how `paint::build_rotated_quad` rotates a
+    /// `SolidRect` about its rect center. `rotation == 0` keeps the
+    /// original `setFrame:` path and resets the transform to identity,
+    /// so the unrotated case is byte-for-byte unchanged.
     #[cfg(target_os = "ios")]
     fn update_native_frame(&self, bounds: &PlatformViewBounds) {
         let view = *self.native_view.lock().unwrap();
         if view.is_null() {
             return;
         }
+        let rotation = *self.rotation.lock().unwrap();
         unsafe {
-            let frame = ObjcCGRect::new(
-                bounds.x as f64,
-                bounds.y as f64,
-                bounds.width as f64,
-                bounds.height as f64,
-            );
-            let _: () = msg_send![view, setFrame: frame];
+            if rotation == 0.0 {
+                // Axis-aligned (unchanged): clear any prior transform,
+                // then position with the plain frame setter.
+                let identity = ObjcCGAffineTransform::identity();
+                let _: () = msg_send![view, setTransform: identity];
+                let frame = ObjcCGRect::new(
+                    bounds.x as f64,
+                    bounds.y as f64,
+                    bounds.width as f64,
+                    bounds.height as f64,
+                );
+                let _: () = msg_send![view, setFrame: frame];
+            } else {
+                // Rotated: set bounds (origin-zero size) + center +
+                // transform. `frame` is undefined under a non-identity
+                // transform, so we drive geometry through these three
+                // properties instead.
+                let local_bounds = ObjcCGRect::new(
+                    0.0,
+                    0.0,
+                    bounds.width as f64,
+                    bounds.height as f64,
+                );
+                let _: () = msg_send![view, setBounds: local_bounds];
+                let center = ObjcCGPoint {
+                    x: (bounds.x + bounds.width * 0.5) as f64,
+                    y: (bounds.y + bounds.height * 0.5) as f64,
+                };
+                let _: () = msg_send![view, setCenter: center];
+                let transform = ObjcCGAffineTransform::rotation(rotation);
+                let _: () = msg_send![view, setTransform: transform];
+            }
 
             let sublayer_frame =
                 ObjcCGRect::new(0.0, 0.0, bounds.width as f64, bounds.height as f64);
@@ -603,6 +649,31 @@ impl PlatformView for IosPlatformView {
         #[cfg(not(target_os = "ios"))]
         {
             let _ = visible;
+        }
+    }
+
+    fn set_rotation(&self, radians: f32) {
+        if self.disposed.load(Ordering::Relaxed) {
+            return;
+        }
+        let radians = radians as f64;
+        {
+            let mut stored = self.rotation.lock().unwrap();
+            if *stored == radians {
+                // No change — avoid re-laying-out the view (and, when
+                // unchanged at 0, leave the legacy frame path entirely
+                // untouched between paints).
+                return;
+            }
+            *stored = radians;
+        }
+        // Re-apply geometry with the new rotation. `update_native_frame`
+        // reads the freshly-stored rotation and chooses the frame vs.
+        // bounds/center/transform path accordingly.
+        #[cfg(target_os = "ios")]
+        {
+            let bounds = *self.bounds.lock().unwrap();
+            self.update_native_frame(&bounds);
         }
     }
 

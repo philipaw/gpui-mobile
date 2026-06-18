@@ -30,6 +30,23 @@ use std::sync::Arc;
 /// The returned element can be styled with `.w()`, `.h()`, `.size()`,
 /// `.flex_grow()`, etc. to control how much space it occupies in the layout.
 pub fn platform_view_element(handle: Arc<PlatformViewHandle>) -> gpui::Div {
+    platform_view_element_rotated(handle, 0.0)
+}
+
+/// Like [`platform_view_element`], but also applies a `radians` rotation
+/// to the hosted native view about its center on every paint.
+///
+/// `radians == 0.0` is byte-for-byte equivalent to
+/// `platform_view_element` (the iOS impl short-circuits an unchanged-0
+/// rotation and keeps the axis-aligned `setFrame:` path). Non-zero
+/// rotates the `UIView` via a `CGAffineTransform`, matching how
+/// GPUI-side `SolidRect`/image widgets rotate about their rect center.
+/// Used by the gem-ios video widget so `Transform2D.rot` rotates a live
+/// `AVPlayerLayer`/`AVSampleBufferDisplayLayer`-backed view.
+pub fn platform_view_element_rotated(
+    handle: Arc<PlatformViewHandle>,
+    radians: f32,
+) -> gpui::Div {
     div().child(
         gpui::canvas(
             // Prepaint: capture bounds
@@ -42,6 +59,11 @@ pub fn platform_view_element(handle: Arc<PlatformViewHandle>) -> gpui::Div {
                     width: prepaint_bounds.size.width.as_f32(),
                     height: prepaint_bounds.size.height.as_f32(),
                 };
+                // Set rotation before bounds: `set_bounds` re-applies the
+                // stored rotation via the native frame update, so the
+                // angle must be current first. An unchanged rotation is a
+                // cheap no-op on the iOS side.
+                handle.set_rotation(radians);
                 handle.set_bounds(logical_bounds);
                 handle.set_visible(true);
                 // First-paint insertion: the iOS impl guards against

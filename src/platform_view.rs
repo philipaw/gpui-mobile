@@ -98,6 +98,18 @@ pub trait PlatformView: Send + Sync {
     /// when the view is explicitly hidden.
     fn set_visible(&self, visible: bool);
 
+    /// Rotate the native view about its center by `radians`.
+    ///
+    /// iOS overrides this to apply a `CGAffineTransform` rotation to the
+    /// hosted `UIView` (pivoting on its center, matching how GPUI-side
+    /// `SolidRect`/image rotation pivots on the widget-rect center). The
+    /// stored angle is re-applied on every `set_bounds` so the per-paint
+    /// frame update doesn't clobber the transform. `0.0` restores the
+    /// identity transform (axis-aligned, byte-for-byte the unrotated
+    /// path). Other platforms no-op by default — rotation of embedded
+    /// native views isn't wired on Android yet.
+    fn set_rotation(&self, _radians: f32) {}
+
     /// Insert the native view into the host window's view hierarchy.
     ///
     /// Called from `platform_view_element`'s paint callback on every
@@ -222,6 +234,14 @@ impl PlatformViewHandle {
     /// Show or hide the view.
     pub fn set_visible(&self, visible: bool) {
         self.view.set_visible(visible);
+    }
+
+    /// Rotate the view about its center by `radians`. Pass-through to
+    /// `PlatformView::set_rotation`. Call alongside `set_bounds` on each
+    /// paint; the iOS impl stores the angle and re-applies it after every
+    /// frame update so the transform survives the per-paint `setFrame:`.
+    pub fn set_rotation(&self, radians: f32) {
+        self.view.set_rotation(radians);
     }
 
     /// Insert the underlying native view into the host window's
