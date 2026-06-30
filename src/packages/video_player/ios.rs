@@ -249,8 +249,17 @@ struct CMTime {
 }
 
 unsafe impl Encode for CMTime {
+    // iOS's Objective-C runtime reports CMTime in method type
+    // signatures as the ANONYMOUS struct `{?=qiIq}` — not `{CMTime=…}`.
+    // objc2's msg_send verification compares struct names, so declaring
+    // "CMTime" here makes every `currentTime` / `duration` /
+    // `seekToTime:` send panic ("expected '{?=qiIq}', found
+    // '{CMTime=qiIq}'"). Use the anonymous name `?` to match the
+    // runtime encoding. (The set_url/set_file_path workaround of
+    // returning a zero VideoInfo + polling stays valid; this makes the
+    // poll accessors — position/duration/seek — actually usable.)
     const ENCODING: Encoding = Encoding::Struct(
-        "CMTime",
+        "?",
         &[
             Encoding::LongLong,
             Encoding::Int,
