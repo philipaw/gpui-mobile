@@ -260,6 +260,16 @@ impl IosPlatformView {
             let _: () = msg_send![prefs, setJavaScriptEnabled: js_enabled];
         }
 
+        // Let embedded media autoplay without a user gesture — a
+        // playlist promotes a music embed programmatically, so there's
+        // no tap to satisfy WKWebView's default gesture requirement.
+        let _: () = msg_send![config, setMediaTypesRequiringUserActionForPlayback: 0u64];
+
+        // Install the `gemPlayer` JS→native message handler so page JS
+        // can signal playback events (e.g. track ended) back to the
+        // room-playlist runtime (DESIGN §6.6).
+        crate::packages::webview::ios::attach_message_handler(config);
+
         let webview: *mut AnyObject = msg_send![class!(WKWebView), alloc];
         let webview: *mut AnyObject =
             msg_send![webview, initWithFrame: frame, configuration: config];

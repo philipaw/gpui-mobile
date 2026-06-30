@@ -11,7 +11,25 @@
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "ios")]
-mod ios;
+pub(crate) mod ios;
+
+/// Drain JS→native messages posted by webview page JS to the
+/// `gemPlayer` script-message handler since the last call (DESIGN
+/// §6.6 — room-playlist end-of-track signalling). Each entry is the
+/// raw string the page passed to
+/// `window.webkit.messageHandlers.gemPlayer.postMessage(...)`; the
+/// host parses it (we use a JSON `{event, widget}`). Empty on
+/// non-iOS targets.
+pub fn drain_messages() -> Vec<String> {
+    #[cfg(target_os = "ios")]
+    {
+        ios::drain_messages()
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        Vec::new()
+    }
+}
 
 use crate::platform_view::{
     PlatformViewBounds, PlatformViewHandle, PlatformViewParams, PlatformViewRegistry,
