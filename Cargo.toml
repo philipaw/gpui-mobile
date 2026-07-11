@@ -87,6 +87,11 @@ accesskit = "0.24"
 accesskit-ios = { path = "accesskit-ios" }
 
 # Apple frameworks
+# Tolerant CoreText trait/font reading (gem spikes/ct-text-traits):
+# replaces the CFNumber-only downcasts that abort on iOS, where
+# zero-valued traits are kCFBooleanFalse (DESIGN-IOS-FONT-TRAITS §2a).
+# Path is relative to gem's vendor/gpui-mobile submodule location.
+ct-text-traits      = { path = "../../spikes/ct-text-traits" }
 core-foundation     = "0.10"
 core-foundation-sys = "0.8"
 core-graphics       = "0.24"

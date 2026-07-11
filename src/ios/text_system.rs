@@ -16,14 +16,7 @@ use core_graphics::{
     context::{CGContext, CGTextDrawingMode},
     geometry::CGPoint,
 };
-use core_text::{
-    font::CTFont,
-    font_descriptor::{
-        kCTFontSlantTrait, kCTFontSymbolicTrait, kCTFontWeightTrait, kCTFontWidthTrait,
-    },
-    line::CTLine,
-    string_attributes::kCTFontAttributeName,
-};
+use core_text::{font::CTFont, line::CTLine, string_attributes::kCTFontAttributeName};
 use font_kit::{
     font::Font as FontKitFont,
     handle::Handle,
@@ -137,9 +130,13 @@ impl PlatformTextSystem for IosTextSystem {
                     font_ids
                 };
 
+            // ct-text-traits: font-kit's `properties()` routes through
+            // core-text's `.unwrap()`-ing trait accessors, which abort on
+            // iOS where zero-valued traits are kCFBooleanFalse (§2a of
+            // DESIGN-IOS-FONT-TRAITS.md). Read via the tolerant crate.
             let candidate_properties: SmallVec<[font_kit::properties::Properties; 4]> = candidates
                 .iter()
-                .map(|font_id| lock.fonts[font_id.0].properties())
+                .map(|font_id| ct_text_traits::properties(&lock.fonts[font_id.0].native_font()))
                 .collect();
 
             let ix = font_kit::matching::find_best_match(
@@ -267,29 +264,17 @@ impl IosTextSystemState {
                 }
             }
 
-            // Validate font traits to avoid panics from malformed fonts
-            let traits = font.native_font().all_traits();
-            if unsafe {
-                !(traits
-                    .get(kCTFontSymbolicTrait)
-                    .downcast::<CFNumber>()
-                    .is_some()
-                    && traits
-                        .get(kCTFontWidthTrait)
-                        .downcast::<CFNumber>()
-                        .is_some()
-                    && traits
-                        .get(kCTFontWeightTrait)
-                        .downcast::<CFNumber>()
-                        .is_some()
-                    && traits
-                        .get(kCTFontSlantTrait)
-                        .downcast::<CFNumber>()
-                        .is_some())
-            } {
+            // Validate font traits to avoid panics from malformed fonts.
+            // ct-text-traits replaces the all-CFNumber downcast check: on
+            // iOS, zero-valued traits arrive as kCFBooleanFalse, so the
+            // old check rejected EVERY normal font (width is 0 for nearly
+            // all of them), leaving an empty candidate list that panicked
+            // downstream. `read_traits` tolerates CFNumber + CFBoolean;
+            // `None` now means a genuinely unreadable trait value.
+            if ct_text_traits::read_traits(&font.native_font()).is_none() {
                 log::error!(
                     "Failed to read traits for font {:?}",
-                    font.postscript_name().unwrap()
+                    font.postscript_name()
                 );
                 continue;
             }
@@ -485,12 +470,14 @@ impl IosTextSystemState {
         let mut runs = <Vec<ShapedRun>>::with_capacity(glyph_runs.len() as usize);
         let mut ix_converter = StringIndexConverter::new(text);
         for run in glyph_runs.into_iter() {
-            let attributes = run.attributes().unwrap();
-            let font = unsafe {
-                attributes
-                    .get(kCTFontAttributeName)
-                    .downcast::<CTFont>()
-                    .unwrap()
+            // ct-text-traits: recover the run's font without `.unwrap()`s
+            // that abort across the C FFI boundary. Probe evidence says
+            // recovery succeeds for styled AND default runs; if a run
+            // ever carries no recoverable CTFont, degrade to skipping it
+            // (glyphs missing beats a process abort — the §5.4 fallback).
+            let Some(font) = ct_text_traits::run_font(&run) else {
+                log::warn!("layout_line: glyph run without a recoverable CTFont; skipping run");
+                continue;
             };
             let font_id = self.id_for_native_font(font);
 
