@@ -68,13 +68,13 @@ futures      = "0.3"
 raw-window-handle = "0.6"
 
 # ── GPUI core crate (provides Platform trait, event types, geometry, etc.) ───
-gpui = { git = "https://github.com/philipaw/zed", rev = "1f5f5fd163a5b4ee4ba8e51d477f818bde309fa4", package = "gpui", default-features = false }
+gpui = { git = "https://github.com/philipaw/zed", rev = "e83cc1290a8c92e76c4ddbb40a47641e51c0392d", package = "gpui", default-features = false }
 
 # Real HttpClient implementation backing `gpui::img(url)` etc. Without
 # this gpui defaults to `FakeHttpClient::with_404_response`, which makes
 # any URL-sourced image silently 404 (banked in gem's §17.8 from the
 # s50 YouTube-poster work).
-reqwest_client = { git = "https://github.com/philipaw/zed", rev = "1f5f5fd163a5b4ee4ba8e51d477f818bde309fa4", package = "reqwest_client" }
+reqwest_client = { git = "https://github.com/philipaw/zed", rev = "e83cc1290a8c92e76c4ddbb40a47641e51c0392d", package = "reqwest_client" }
 
 # ── iOS ──────────────────────────────────────────────────────────────────────
 
@@ -108,7 +108,7 @@ objc2-core-media      = { version = "0.3", features = [
 ] }
 
 # wgpu renderer (Metal backend on iOS/Android)
-gpui_wgpu = { git = "https://github.com/philipaw/zed", rev = "1f5f5fd163a5b4ee4ba8e51d477f818bde309fa4", package = "gpui_wgpu", features = ["font-kit"] }
+gpui_wgpu = { git = "https://github.com/philipaw/zed", rev = "e83cc1290a8c92e76c4ddbb40a47641e51c0392d", package = "gpui_wgpu", features = ["font-kit"] }
 wgpu = { git = "https://github.com/zed-industries/wgpu.git", branch = "v29" }
 
 # Text / font stack
@@ -138,7 +138,7 @@ android-activity = { version = "0.6", features = ["native-activity"] }
 android_logger = "0.15"
 
 # wgpu renderer (Vulkan backend on Android)
-gpui_wgpu = { git = "https://github.com/philipaw/zed", rev = "1f5f5fd163a5b4ee4ba8e51d477f818bde309fa4", package = "gpui_wgpu", features = ["font-kit"] }
+gpui_wgpu = { git = "https://github.com/philipaw/zed", rev = "e83cc1290a8c92e76c4ddbb40a47641e51c0392d", package = "gpui_wgpu", features = ["font-kit"] }
 
 # rustc-hash is required by the PlatformKeyboardMapper trait signature
 rustc-hash = "2"

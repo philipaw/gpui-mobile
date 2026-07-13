@@ -2019,6 +2019,12 @@ impl PlatformWindow for IosWindow {
     fn draw(&self, scene: &Scene) {
         let mut guard = self.renderer.lock();
         if let Some(renderer) = guard.as_mut() {
+            // gem Track G: re-apply the app-pushed glass state every
+            // frame — renderer (re)construction and device recovery
+            // both reset it from `GEM_GLASS_OFF`.
+            if let Some(enabled) = crate::glass_desired() {
+                renderer.set_glass_enabled(enabled);
+            }
             renderer.draw(scene);
         } else {
             log::trace!("GPUI iOS: draw called but no renderer available");

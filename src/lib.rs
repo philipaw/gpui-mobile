@@ -320,6 +320,30 @@ pub fn set_keyboard_height(height: f32) {
     }
 }
 
+// ── Glass pass (gem Track G) ─────────────────────────────────────────────────
+
+/// Desired glass-pass state pushed by the app's chrome-mode triggers.
+/// Tri-state: 0 = unset (renderer keeps its `GEM_GLASS_OFF`-derived
+/// default), 1 = glass off, 2 = glass on.
+static GLASS_DESIRED: AtomicU32 = AtomicU32::new(0);
+
+/// Push the app's desired glass-pass state (gem 0i triggers:
+/// reduce-transparency / thermal / low-power). Applied to the live
+/// `WgpuRenderer` on every `draw`, so it survives renderer
+/// recreation and device recovery (both re-read `GEM_GLASS_OFF`).
+pub fn set_glass_enabled(enabled: bool) {
+    GLASS_DESIRED.store(if enabled { 2 } else { 1 }, Ordering::Release);
+}
+
+/// The pushed glass state, if the app has ever pushed one.
+pub(crate) fn glass_desired() -> Option<bool> {
+    match GLASS_DESIRED.load(Ordering::Acquire) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
 // ── Safe area insets ─────────────────────────────────────────────────────────
 
 /// Query the safe area insets from the platform.
