@@ -23,7 +23,7 @@ use accesskit_ios::SubclassingAdapter;
 use gpui::accessibility::PendingA11yAction;
 use gpui::FocusId;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
@@ -60,10 +60,24 @@ impl DerefMut for SendSubclassingAdapter {
 
 #[derive(Default)]
 pub(crate) struct A11yState {
-    /// FIRST `TreeUpdate` from gpui's drain — has `tree: Some(...)` plus
-    /// the full nodes list. Required because subsequent emissions are
-    /// diffs that can't initialize `accesskit_consumer::Tree::new`.
+    /// Full-tree `TreeUpdate` snapshot rebuilt on EVERY drain by
+    /// [`A11yState::absorb_drain`], so `accesskit_consumer::Tree::new`
+    /// initializes consistently no matter WHEN the AT activates.
+    ///
+    /// This used to cache only the FIRST drain, which went stale as
+    /// soon as the element tree mutated (screen changes) while the
+    /// adapter was inactive: a late activation then initialized the
+    /// consumer from the stale snapshot, and the next diff referenced
+    /// nodes it never received — panicking `validate_global` with
+    /// "Focused ID #… is not in the node list" (gem §17.8 #120, found
+    /// live by the ds/0f shell-chrome AT walk, 2026-07-11).
     pub(crate) initial_update: Option<TreeUpdate>,
+    /// Latest data for every drained node, pruned after each absorb to
+    /// the set reachable from the root (dead screens don't linger).
+    snapshot_nodes: HashMap<accesskit::NodeId, accesskit::Node>,
+    /// Tree descriptor from the most recent update carrying one (gpui
+    /// emits it on the first drain; it only names the root).
+    snapshot_tree: Option<accesskit::Tree>,
     /// Most-recent `NodeId → FocusId` inverse map from gpui's drain.
     /// Replaced each frame. The action handler reads this to resolve
     /// `Action::Focus` requests back to a gpui `FocusHandle`.
@@ -74,6 +88,66 @@ pub(crate) struct A11yState {
     /// `IosWindow::take_pending_a11y_actions` drains the queue on each
     /// gpui draw where those mutable references are available.
     pub(crate) pending_actions: Vec<PendingA11yAction>,
+}
+
+impl A11yState {
+    /// Fold one drained (possibly diff) `TreeUpdate` into the running
+    /// full-tree snapshot and rebuild `initial_update` from it, so an
+    /// AT activating at ANY later point starts from a tree consistent
+    /// with the next diff it will receive.
+    ///
+    /// Three moves:
+    /// - **merge**: every node in the update replaces its entry in
+    ///   `snapshot_nodes` (diffs re-emit any node whose data changed);
+    /// - **prune**: walk the root-reachable set — nodes a diff dropped
+    ///   (their parent stopped listing them) become unreachable and
+    ///   are removed, so dead screens leave no ghosts;
+    /// - **clamp**: the snapshot's focus must exist in the snapshot
+    ///   (`validate_global` panics otherwise) — fall back to the root.
+    pub(crate) fn absorb_drain(&mut self, update: &TreeUpdate) {
+        for (id, node) in &update.nodes {
+            self.snapshot_nodes.insert(*id, node.clone());
+        }
+        if update.tree.is_some() {
+            self.snapshot_tree = update.tree.clone();
+        }
+        let Some(tree) = self.snapshot_tree.clone() else {
+            return;
+        };
+        let mut reachable: Vec<(accesskit::NodeId, accesskit::Node)> = Vec::new();
+        let mut seen: HashSet<accesskit::NodeId> = HashSet::new();
+        let mut stack = vec![tree.root];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some(node) = self.snapshot_nodes.get(&id) {
+                stack.extend(node.children().iter().copied());
+                reachable.push((id, node.clone()));
+            }
+        }
+        self.snapshot_nodes.retain(|id, _| seen.contains(id));
+        let focus = if seen.contains(&update.focus) {
+            update.focus
+        } else {
+            tree.root
+        };
+        self.initial_update = Some(TreeUpdate {
+            // gpui stamps every drain with `TreeId::ROOT`; carry the
+            // live update's id through so the snapshot matches.
+            tree_id: update.tree_id.clone(),
+            nodes: reachable,
+            tree: Some(tree),
+            focus,
+        });
+    }
+
+    /// Debug hook: current snapshot size (root-reachable node count).
+    /// Read by `DEBUG_A11Y_SNAPSHOT=1` logging in `window.rs` so hosts
+    /// can assert pruning from run logs.
+    pub(crate) fn snapshot_len(&self) -> usize {
+        self.snapshot_nodes.len()
+    }
 }
 
 pub(crate) struct WindowActivationHandler {

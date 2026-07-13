@@ -1823,14 +1823,20 @@ impl PlatformWindow for IosWindow {
         // per-frame state for the activation + action handlers (which
         // are owned by the adapter and can't be mutated externally).
         //
-        // - `initial_update` only gets set on the FIRST drain. gpui's
-        //   first emission has `tree: Some(...)` plus a full nodes list,
-        //   which is what `accesskit_consumer::Tree::new` needs.
-        //   Subsequent emissions are diffs that would panic init.
+        // - `absorb_drain` folds EVERY (diff) update into the running
+        //   full-tree snapshot behind `initial_update`, so an AT that
+        //   activates after the element tree has mutated still gets a
+        //   `Tree::new`-consistent snapshot. The previous first-drain-
+        //   only cache panicked `validate_global` on late activation
+        //   (gem §17.8 #120).
         // - `focus_inverse_map` is replaced every frame so the action
         //   handler always sees the latest mapping.
         let state = self.a11y_state.clone();
         let adapter = self.a11y_adapter.clone();
+        let snapshot_log = std::env::var("DEBUG_A11Y_SNAPSHOT")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
+        let mut last_logged_len = usize::MAX;
         Some(Box::new(move |drain: gpui::accessibility::AccessibilityDrain| {
             let gpui::accessibility::AccessibilityDrain {
                 tree_update,
@@ -1838,8 +1844,15 @@ impl PlatformWindow for IosWindow {
             } = drain;
             {
                 let mut a11y = state.lock();
-                if a11y.initial_update.is_none() {
-                    a11y.initial_update = Some(tree_update.clone());
+                a11y.absorb_drain(&tree_update);
+                if snapshot_log {
+                    // Log only on change: hosts assert pruning (no
+                    // ghost nodes from dead screens) from run logs.
+                    let len = a11y.snapshot_len();
+                    if len != last_logged_len {
+                        last_logged_len = len;
+                        eprintln!("[a11y-snapshot] reachable_nodes={len}");
+                    }
                 }
                 a11y.focus_inverse_map = focus_inverse_map;
             }
