@@ -5,7 +5,7 @@ use super::{
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{class, msg_send, sel};
 use std::collections::HashMap;
-use std::sync::{mpsc, Mutex, Once};
+use std::sync::{Mutex, Once, mpsc};
 
 #[link(name = "AVFoundation", kind = "framework")]
 extern "C" {}

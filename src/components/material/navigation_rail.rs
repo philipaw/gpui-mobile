@@ -40,7 +40,7 @@
 //!     }));
 //! ```
 
-use gpui::{div, prelude::*, px, rgb, AnyElement, MouseButton, MouseDownEvent, Window};
+use gpui::{AnyElement, MouseButton, MouseDownEvent, Window, div, prelude::*, px, rgb};
 
 use super::theme::{MaterialTheme, ShapeScale};
 

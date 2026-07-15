@@ -48,16 +48,16 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
 use super::{
+    AndroidBackend,
     dispatcher::AndroidDispatcher,
     display::{AndroidDisplay, DisplayList},
     window::{AndroidWindow, WindowList},
-    AndroidBackend,
 };
 use gpui_wgpu::GpuContext;
 
@@ -1544,10 +1544,11 @@ mod tests {
     #[test]
     fn credentials_missing_returns_none() {
         let p = headless();
-        assert!(p
-            .read_credentials("no-such-service", "user")
-            .unwrap()
-            .is_none());
+        assert!(
+            p.read_credentials("no-such-service", "user")
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ── misc platform queries ─────────────────────────────────────────────────

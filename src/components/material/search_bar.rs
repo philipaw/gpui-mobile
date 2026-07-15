@@ -61,9 +61,9 @@
 //! - Trailing icon(s): on-surface-variant
 //! - Search view: surface-container-high, full width, with divider below input
 
-use gpui::{div, prelude::*, px, AnyElement, Hsla, MouseButton, MouseDownEvent, Stateful, Window};
+use gpui::{AnyElement, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px};
 
-use super::theme::{color, MaterialTheme};
+use super::theme::{MaterialTheme, color};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

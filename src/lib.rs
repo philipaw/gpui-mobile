@@ -143,14 +143,35 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 type TextInputCallbackFn = Box<dyn FnMut(&str)>;
 
-/// Global flag indicating that text input was received and a re-render is needed.
+/// Global flag: something OUTSIDE gpui's entity system changed, and the
+/// next frame must run even though nothing marked the window dirty.
 ///
-/// GPUI only redraws when its invalidator is dirty. Since `dispatch_text_input`
-/// stores text in a thread-local (`PENDING_TEXT`) outside of GPUI's entity
-/// system, nothing marks the window dirty. The platform frame callbacks check
-/// this flag and pass `force_render: true` to ensure the render cycle runs,
-/// which in turn calls `drain_pending_text()` and updates the UI.
+/// GPUI only redraws when its invalidator is dirty. State that lives
+/// outside the entity system — text stashed in a thread-local by
+/// `dispatch_text_input`, an event enqueued by a native platform view,
+/// an async completion — dirties nothing, so the frame callback would
+/// skip and the change would never be observed. The platform frame
+/// callbacks check this flag and pass `force_render: true`, which runs
+/// the render cycle once (draining pending text, native events, etc).
+///
+/// Prefer [`request_render`] over touching this directly.
 pub static TEXT_INPUT_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// Wake the render loop for exactly one frame, from outside gpui.
+///
+/// This is the seam for anything gpui cannot see: a native
+/// (platform-view) control action, a background completion, a
+/// lock-screen remote command. It is REQUIRED whenever the app only
+/// requests frames while something is animating — a loop that is
+/// asleep has no other way to learn that an external event arrived,
+/// and the event would be silently dropped (a dead button).
+///
+/// Cheap and idempotent: the display link checks the flag every vsync,
+/// so the wake latency is at most one frame, and N calls before the
+/// next tick coalesce into one render.
+pub fn request_render() {
+    TEXT_INPUT_DIRTY.store(true, Ordering::Release);
+}
 
 /// Latest `CADisplayLink.targetTimestamp` (host time in seconds,
 /// same coordinate space as `CACurrentMediaTime`) — written by the
@@ -423,12 +444,12 @@ pub mod android;
 // ── public re-exports ────────────────────────────────────────────────────────
 
 #[cfg(target_os = "ios")]
-pub use ios::{current_platform, IosPlatform};
+pub use ios::{IosPlatform, current_platform};
 
 #[cfg(target_os = "android")]
-pub use android::{current_platform, AndroidPlatform};
+pub use android::{AndroidPlatform, current_platform};
 
-pub use target_platform::{target_platform, TargetPlatform, DEFAULT_PLATFORM};
+pub use target_platform::{DEFAULT_PLATFORM, TargetPlatform, target_platform};
 
 // ── fallback for non-mobile host builds (e.g. documentation / CI) ────────────
 

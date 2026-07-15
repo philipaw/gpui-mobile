@@ -26,7 +26,7 @@
 //!     .floating_action_button(my_fab)
 //! ```
 
-use gpui::{div, prelude::*, px, rgb, AnyElement};
+use gpui::{AnyElement, div, prelude::*, px, rgb};
 
 use super::theme::MaterialTheme;
 

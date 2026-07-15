@@ -88,7 +88,9 @@ pub fn get_save_path(options: &SaveFileOptions) -> Result<Option<String>, String
             .call_static_method(
                 &cls,
                 jni::jni_str!("getSavePath"),
-                jni::jni_sig!("(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
+                jni::jni_sig!(
+                    "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+                ),
                 &[
                     JValue::Object(&activity),
                     JValue::Object(&j_mime),

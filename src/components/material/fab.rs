@@ -42,7 +42,7 @@
 //!     .on_click(cx.listener(|this, _, _, cx| { /* compose */ }));
 //! ```
 
-use gpui::{div, prelude::*, px, rgb, MouseButton, MouseDownEvent, Stateful, Window};
+use gpui::{MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px, rgb};
 
 use super::theme::MaterialTheme;
 

@@ -105,8 +105,7 @@ impl IosPlatformView {
                     // release builds skip the check. Pass the
                     // raw CMTimebase pointer instead.
                     let tb_ptr: *const objc2_core_media::CMTimebase = &**tb_ref;
-                    let _: () =
-                        msg_send![layer, setControlTimebase: tb_ptr];
+                    let _: () = msg_send![layer, setControlTimebase: tb_ptr];
                 }
                 (layer, tb)
             }
@@ -154,9 +153,7 @@ impl IosPlatformView {
                 "video_player" => Self::create_video_player_view(frame, params)?,
                 "webview" => Self::create_webview_view(frame, params)?,
                 "camera_preview" => Self::create_camera_preview_view(frame, params)?,
-                VIEW_TYPE_SAMPLE_BUFFER_DISPLAY => {
-                    Self::create_sample_buffer_display_view(frame)?
-                }
+                VIEW_TYPE_SAMPLE_BUFFER_DISPLAY => Self::create_sample_buffer_display_view(frame)?,
                 _ => Self::create_generic_view(frame)?,
             };
 
@@ -297,10 +294,7 @@ impl IosPlatformView {
                 // embedding services that reject iframes loaded from
                 // a null origin (e.g. YouTube returns "Error 153
                 // Video player configuration error" without one).
-                let base_url: *mut AnyObject = match params
-                    .creation_params
-                    .get("base_url")
-                {
+                let base_url: *mut AnyObject = match params.creation_params.get("base_url") {
                     Some(s) if !s.is_empty() => {
                         let ns_base_str = Self::make_nsstring(s);
                         let url: *mut AnyObject =
@@ -342,8 +336,7 @@ impl IosPlatformView {
         if layer.is_null() {
             return Err("Failed to create AVSampleBufferDisplayLayer".into());
         }
-        let sublayer_frame =
-            ObjcCGRect::new(0.0, 0.0, frame.width, frame.height);
+        let sublayer_frame = ObjcCGRect::new(0.0, 0.0, frame.width, frame.height);
         let _: () = msg_send![layer, setFrame: sublayer_frame];
         // `resize` (the literal value of `AVLayerVideoGravityResize`,
         // also valid as a CALayer contentsGravity) — the layer
@@ -455,8 +448,7 @@ impl IosPlatformView {
                         // not below).
                         let metal_view = window.metal_view_ptr();
                         if !metal_view.is_null() {
-                            let parent: *mut AnyObject =
-                                msg_send![metal_view, superview];
+                            let parent: *mut AnyObject = msg_send![metal_view, superview];
                             if !parent.is_null() {
                                 let _: () = msg_send![
                                     parent,
@@ -590,12 +582,8 @@ impl IosPlatformView {
                 // transform. `frame` is undefined under a non-identity
                 // transform, so we drive geometry through these three
                 // properties instead.
-                let local_bounds = ObjcCGRect::new(
-                    0.0,
-                    0.0,
-                    bounds.width as f64,
-                    bounds.height as f64,
-                );
+                let local_bounds =
+                    ObjcCGRect::new(0.0, 0.0, bounds.width as f64, bounds.height as f64);
                 let _: () = msg_send![view, setBounds: local_bounds];
                 let center = ObjcCGPoint {
                     x: (bounds.x + bounds.width * 0.5) as f64,
@@ -835,8 +823,7 @@ impl PlatformView for IosPlatformView {
                 let ca_tx = class!(CATransaction);
                 let _: () = msg_send![ca_tx, begin];
                 let _: () = msg_send![ca_tx, setDisableActions: true];
-                let _: () =
-                    msg_send![layer, setContents: surface as *mut AnyObject];
+                let _: () = msg_send![layer, setContents: surface as *mut AnyObject];
                 // Idempotent layer config — cheap enough to set every
                 // frame; setting once on first non-null contents is a
                 // future optimisation if profiling demands it.
@@ -930,11 +917,7 @@ unsafe fn make_host_timebase() -> Result<objc2::rc::Retained<objc2_core_media::C
 
     let host_clock = CMClock::host_time_clock();
     let mut tb_out: *mut CMTimebase = std::ptr::null_mut();
-    let status = CMTimebaseCreateWithSourceClock(
-        std::ptr::null_mut(),
-        &*host_clock,
-        &mut tb_out,
-    );
+    let status = CMTimebaseCreateWithSourceClock(std::ptr::null_mut(), &*host_clock, &mut tb_out);
     if status != 0 || tb_out.is_null() {
         return Err(format!("CMTimebaseCreateWithSourceClock status={status}"));
     }

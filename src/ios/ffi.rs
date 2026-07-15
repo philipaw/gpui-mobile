@@ -14,7 +14,7 @@
 
 use gpui::{App, AppContext, Application, RequestFrameOptions, WindowOptions};
 use std::ffi::c_void;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -298,8 +298,10 @@ pub extern "C" fn gpui_ios_request_frame(window_ptr: *mut c_void) {
 /// at touch arrival to compute touch→present-time latency.
 #[unsafe(no_mangle)]
 pub extern "C" fn gpui_ios_set_display_link_target(target_timestamp: f64) {
-    crate::LATEST_DISPLAY_LINK_TARGET_BITS
-        .store(target_timestamp.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    crate::LATEST_DISPLAY_LINK_TARGET_BITS.store(
+        target_timestamp.to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// gem D4 native tuning panel — set one glass-composite param
@@ -559,14 +561,10 @@ pub fn run_app() {
     // `proxy_and_user_agent` routes through
     // `http_client_tls::tls_config()` which sets up
     // `rustls-platform-verifier`, hitting iOS's system trust store.
-    let http_client: std::sync::Arc<dyn gpui::http_client::HttpClient> =
-        std::sync::Arc::new(
-            reqwest_client::ReqwestClient::proxy_and_user_agent(
-                None,
-                "gpui-mobile/0.1",
-            )
+    let http_client: std::sync::Arc<dyn gpui::http_client::HttpClient> = std::sync::Arc::new(
+        reqwest_client::ReqwestClient::proxy_and_user_agent(None, "gpui-mobile/0.1")
             .expect("ReqwestClient::proxy_and_user_agent"),
-        );
+    );
     let mut app = Application::with_platform(platform).with_http_client(http_client);
     // `run_until(&mut self, ...)` (gpui core, philipaw/zed @ bb5281fa7d+):
     // the `&mut self` shape lets us hold `app` past the run callback,

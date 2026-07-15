@@ -20,8 +20,8 @@
 
 use accesskit::{Action, ActionHandler, ActionRequest, ActivationHandler, TreeUpdate};
 use accesskit_ios::SubclassingAdapter;
-use gpui::accessibility::PendingA11yAction;
 use gpui::FocusId;
+use gpui::accessibility::PendingA11yAction;
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
 use std::ops::{Deref, DerefMut};
@@ -169,7 +169,9 @@ impl ActionHandler for IosActionHandler {
         if matches!(request.action, Action::Focus) {
             let mut state = self.state.lock();
             if let Some(focus_id) = state.focus_inverse_map.get(&request.target_node).copied() {
-                state.pending_actions.push(PendingA11yAction::Focus(focus_id));
+                state
+                    .pending_actions
+                    .push(PendingA11yAction::Focus(focus_id));
                 log::info!(
                     "[a11y] Action::Focus resolved target_node={:?} → {:?} (enqueued)",
                     request.target_node,

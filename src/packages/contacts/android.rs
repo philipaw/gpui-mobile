@@ -1,5 +1,5 @@
 use super::{Contact, EmailAddress, PhoneNumber};
-use crate::android::jni::{self as jni_helpers, get_string, JniExt};
+use crate::android::jni::{self as jni_helpers, JniExt, get_string};
 use jni::objects::JValue;
 
 const HELPER_CLASS: &str = "dev.gpui.mobile.GpuiContacts";

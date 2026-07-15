@@ -55,9 +55,9 @@
 //!   at any single frame and can be animated externally via
 //!   `window.request_animation_frame()`.
 
-use gpui::{div, prelude::*, px, Hsla};
+use gpui::{Hsla, div, prelude::*, px};
 
-use super::theme::{color, MaterialTheme};
+use super::theme::{MaterialTheme, color};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

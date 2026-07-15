@@ -45,9 +45,9 @@
 //!     .item("Luna", cx.listener(|this, _, _, cx| { /* ... */ }));
 //! ```
 
-use gpui::{div, prelude::*, px, AnyElement, Hsla, MouseButton, MouseDownEvent, Stateful, Window};
+use gpui::{AnyElement, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px};
 
-use super::theme::{color, MaterialTheme, ShapeScale};
+use super::theme::{MaterialTheme, ShapeScale, color};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

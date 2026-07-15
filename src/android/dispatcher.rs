@@ -28,8 +28,8 @@ use std::{
     collections::VecDeque,
     os::unix::io::RawFd,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -568,8 +568,8 @@ impl PlatformDispatcher for AndroidDispatcher {
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     /// Verify that the thread-pool executes background tasks.

@@ -18,7 +18,7 @@
 //! ```
 
 use crate::platform_view::{PlatformViewBounds, PlatformViewHandle};
-use gpui::{div, ParentElement, Styled};
+use gpui::{ParentElement, Styled, div};
 use std::sync::Arc;
 
 /// Create a GPUI element that hosts a native platform view.
@@ -43,10 +43,7 @@ pub fn platform_view_element(handle: Arc<PlatformViewHandle>) -> gpui::Div {
 /// GPUI-side `SolidRect`/image widgets rotate about their rect center.
 /// Used by the gem-ios video widget so `Transform2D.rot` rotates a live
 /// `AVPlayerLayer`/`AVSampleBufferDisplayLayer`-backed view.
-pub fn platform_view_element_rotated(
-    handle: Arc<PlatformViewHandle>,
-    radians: f32,
-) -> gpui::Div {
+pub fn platform_view_element_rotated(handle: Arc<PlatformViewHandle>, radians: f32) -> gpui::Div {
     div().child(
         gpui::canvas(
             // Prepaint: capture bounds
@@ -72,10 +69,7 @@ pub fn platform_view_element_rotated(
                 // its insertion happens at create time via the JNI
                 // bridge.
                 if let Err(e) = handle.insert_into_window() {
-                    log::warn!(
-                        "platform_view_element: insert_into_window failed: {}",
-                        e
-                    );
+                    log::warn!("platform_view_element: insert_into_window failed: {}", e);
                 }
             },
         )

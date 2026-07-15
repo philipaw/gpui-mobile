@@ -15,10 +15,10 @@
 //! All components follow a builder pattern and implement `IntoElement`.
 
 use gpui::{
-    div, prelude::*, px, rgb, AnyElement, Hsla, MouseButton, MouseDownEvent, Stateful, Window,
+    AnyElement, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px, rgb,
 };
 
-use super::theme::{color, MaterialTheme, ShapeScale, TRANSPARENT};
+use super::theme::{MaterialTheme, ShapeScale, TRANSPARENT, color};
 
 // ── Click handler alias ──────────────────────────────────────────────────────
 

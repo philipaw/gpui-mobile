@@ -71,7 +71,9 @@ unsafe extern "C" fn did_receive_message(
     if cstr.is_null() {
         return;
     }
-    let s = std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned();
+    let s = std::ffi::CStr::from_ptr(cstr)
+        .to_string_lossy()
+        .into_owned();
     if let Ok(mut q) = MESSAGES.lock() {
         q.push(s);
     }

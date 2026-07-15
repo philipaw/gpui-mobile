@@ -39,7 +39,7 @@ use gpui::{
     PlatformDisplay, PlatformInputHandler, PlatformWindow, PromptButton, PromptLevel,
     RequestFrameOptions, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
 };
-use gpui_wgpu::{wgpu, GpuContext, WgpuRenderer, WgpuSurfaceConfig};
+use gpui_wgpu::{GpuContext, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 use parking_lot::Mutex;
 use raw_window_handle::{
     AndroidDisplayHandle, AndroidNdkWindowHandle, HasDisplayHandle, HasWindowHandle,
@@ -729,8 +729,13 @@ impl AndroidWindow {
             let scale = self.scale_factor();
             log::debug!(
                 "handle_touch: id={} action={} phys=({:.0},{:.0}) logical=({:.0},{:.0}) scale={:.1}",
-                point.id, point.action, point.x, point.y,
-                point.x / scale, point.y / scale, scale,
+                point.id,
+                point.action,
+                point.x,
+                point.y,
+                point.x / scale,
+                point.y / scale,
+                scale,
             );
             cb(point);
             let mut state = self.state.lock();
@@ -1691,7 +1696,7 @@ impl PlatformWindow for AndroidPlatformWindow {
             let cb = Arc::clone(&input_cb);
             self.window.on_key_event(move |key_event| {
                 use crate::android::keyboard::{
-                    android_key_to_keystroke, AKEY_EVENT_ACTION_DOWN, AKEY_EVENT_ACTION_UP,
+                    AKEY_EVENT_ACTION_DOWN, AKEY_EVENT_ACTION_UP, android_key_to_keystroke,
                 };
 
                 // On KeyDown, dispatch text through the global callback so

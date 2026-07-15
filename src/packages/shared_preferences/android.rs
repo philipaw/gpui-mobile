@@ -1,4 +1,4 @@
-use crate::android::jni::{self as jni_helpers, get_string, JniExt};
+use crate::android::jni::{self as jni_helpers, JniExt, get_string};
 use jni::objects::{JObject, JValue};
 
 pub struct AndroidSharedPreferences;
@@ -184,11 +184,7 @@ fn get_default_prefs<'local>(env: &mut jni::Env<'local>) -> Option<JObject<'loca
         )
         .and_then(|v| v.l())
         .ok()?;
-    if prefs.is_null() {
-        None
-    } else {
-        Some(prefs)
-    }
+    if prefs.is_null() { None } else { Some(prefs) }
 }
 
 /// Get an editor, run the callback, then commit.

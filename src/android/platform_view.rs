@@ -49,7 +49,7 @@ impl AndroidPlatformView {
 
     /// Create the native Android View via JNI.
     fn create_native_view(&self, params: &PlatformViewParams) -> Result<(), String> {
-        use super::jni::{activity, find_app_class, with_env, JniExt};
+        use super::jni::{JniExt, activity, find_app_class, with_env};
         use jni::objects::JValue;
 
         with_env(|env| {

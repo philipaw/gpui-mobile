@@ -16,7 +16,7 @@
 //! - [`avatars`] — a composite card showcasing size variants, status
 //!   indicators, and a stacked group
 
-use gpui::{div, prelude::*, px, rgb, Pixels};
+use gpui::{Pixels, div, prelude::*, px, rgb};
 
 // ── Colour constants (Catppuccin Mocha) ──────────────────────────────────────
 

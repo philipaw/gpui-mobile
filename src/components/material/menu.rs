@@ -60,9 +60,9 @@
 //! - Divider: outline-variant, 1dp height, 0dp horizontal margin
 //! - Disabled items: 38% opacity
 
-use gpui::{div, prelude::*, px, AnyElement, Hsla, MouseButton, MouseDownEvent, Stateful, Window};
+use gpui::{AnyElement, Hsla, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px};
 
-use super::theme::{color, MaterialTheme, ShapeScale, TRANSPARENT};
+use super::theme::{MaterialTheme, ShapeScale, TRANSPARENT, color};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

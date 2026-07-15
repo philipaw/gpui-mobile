@@ -41,8 +41,8 @@
 use std::{
     ffi::c_void,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -85,8 +85,8 @@ use android_activity::{AndroidApp, MainEvent, PollEvent};
 
 use super::platform::{AndroidPlatform, SharedPlatform};
 
-use jni::objects::{JObject, JString, JValue};
 use jni::JavaVM;
+use jni::objects::{JObject, JString, JValue};
 
 // ── JNI helpers (safe `jni` crate wrappers) ──────────────────────────────────
 

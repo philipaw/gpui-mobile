@@ -293,11 +293,7 @@ impl MaterialTheme {
     /// Convenience constructor — returns [`dark`](Self::dark) or
     /// [`light`](Self::light) based on the boolean flag.
     pub fn from_appearance(dark: bool) -> Self {
-        if dark {
-            Self::dark()
-        } else {
-            Self::light()
-        }
+        if dark { Self::dark() } else { Self::light() }
     }
 
     // ── Elevation helpers ────────────────────────────────────────────

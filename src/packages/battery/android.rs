@@ -13,11 +13,7 @@ pub fn battery_level() -> i32 {
         Some(v) => v,
         None => return -1,
     };
-    if scale > 0 {
-        (level * 100) / scale
-    } else {
-        -1
-    }
+    if scale > 0 { (level * 100) / scale } else { -1 }
 }
 
 pub fn battery_state() -> BatteryState {

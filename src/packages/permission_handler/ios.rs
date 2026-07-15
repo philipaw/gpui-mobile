@@ -89,7 +89,7 @@ fn av_status_to_permission(status: i64) -> PermissionStatus {
 unsafe fn check_photos_authorization() -> Result<PermissionStatus, String> {
     // PHAuthorizationStatus
     let _status: i64 = msg_send![class!(PHPhotoLibrary), authorizationStatusForAccessLevel: 0i64]; // PHAccessLevelReadWrite=1, but 0 for addOnly
-                                                                                                   // Fallback to the older API
+    // Fallback to the older API
     let status: i64 = msg_send![class!(PHPhotoLibrary), authorizationStatus];
     Ok(match status {
         0 => PermissionStatus::Denied, // PHAuthorizationStatusNotDetermined

@@ -4,7 +4,7 @@
 //! receives text input, and displays the current value with a cursor that
 //! can be positioned within the text.
 
-use gpui::{div, prelude::*, px, rgb, ElementId, MouseButton, MouseDownEvent};
+use gpui::{ElementId, MouseButton, MouseDownEvent, div, prelude::*, px, rgb};
 
 use super::theme::MaterialTheme;
 

@@ -3,8 +3,8 @@ use objc2::encode::{Encode, Encoding, RefEncode};
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Tracks whether each player was explicitly started (to distinguish Paused from Ready).
 struct PlayerEntry {
@@ -399,9 +399,5 @@ unsafe fn get_duration_from_player(player: *mut AnyObject) -> u64 {
     }
     let duration: CMTime = msg_send![item, duration];
     let ms = cmtime_to_ms(duration);
-    if ms < 0 {
-        0
-    } else {
-        ms as u64
-    }
+    if ms < 0 { 0 } else { ms as u64 }
 }

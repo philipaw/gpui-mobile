@@ -11,7 +11,7 @@ use core_foundation::{
     string::CFString,
 };
 use core_graphics::{
-    base::{kCGImageAlphaPremultipliedLast, CGFloat, CGGlyph},
+    base::{CGFloat, CGGlyph, kCGImageAlphaPremultipliedLast},
     color_space::CGColorSpace,
     context::{CGContext, CGTextDrawingMode},
     geometry::CGPoint,
@@ -27,10 +27,10 @@ use font_kit::{
     sources::mem::MemSource,
 };
 use gpui::{
-    point, px, size, Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics,
-    FontRun, FontStyle, FontWeight, GlyphId, LineLayout, Pixels, PlatformTextSystem,
-    RenderGlyphParams, Result, ShapedGlyph, ShapedRun, SharedString, Size, TextRenderingMode,
-    SUBPIXEL_VARIANTS_X,
+    Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
+    FontStyle, FontWeight, GlyphId, LineLayout, Pixels, PlatformTextSystem, RenderGlyphParams,
+    Result, SUBPIXEL_VARIANTS_X, ShapedGlyph, ShapedRun, SharedString, Size, TextRenderingMode,
+    point, px, size,
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use pathfinder_geometry::{
@@ -436,7 +436,7 @@ impl IosTextSystemState {
                 (text_run, text) = text.split_at(run.len);
 
                 let utf16_start = string.char_len(); // insert at end of string
-                                                     // note: replace_str may silently ignore codepoints it dislikes (e.g., BOM at start of string)
+                // note: replace_str may silently ignore codepoints it dislikes (e.g., BOM at start of string)
                 string.replace_str(&CFString::new(text_run), CFRange::init(utf16_start, 0));
                 let utf16_end = string.char_len();
 
@@ -610,17 +610,17 @@ fn apply_features_and_fallbacks(
     fallbacks: Option<&FontFallbacks>,
 ) -> anyhow::Result<()> {
     use core_foundation::{
-        array::{kCFTypeArrayCallBacks, CFArrayAppendValue, CFArrayCreateMutable, CFArrayRef},
-        base::{kCFAllocatorDefault, CFRelease},
+        array::{CFArrayAppendValue, CFArrayCreateMutable, CFArrayRef, kCFTypeArrayCallBacks},
+        base::{CFRelease, kCFAllocatorDefault},
         dictionary::{
-            kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionaryCreate,
+            CFDictionaryCreate, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks,
         },
         string::CFStringRef,
     };
     use core_text::font_descriptor::{
-        kCTFontCascadeListAttribute, kCTFontFeatureSettingsAttribute, CTFontDescriptor,
-        CTFontDescriptorCreateWithAttributes, CTFontDescriptorCreateWithNameAndSize,
-        CTFontDescriptorRef,
+        CTFontDescriptor, CTFontDescriptorCreateWithAttributes,
+        CTFontDescriptorCreateWithNameAndSize, CTFontDescriptorRef, kCTFontCascadeListAttribute,
+        kCTFontFeatureSettingsAttribute,
     };
 
     #[link(name = "CoreText", kind = "framework")]
@@ -730,7 +730,7 @@ mod lenient_font_attributes {
         string::{CFString, CFStringRef},
     };
     use core_text::font_descriptor::{
-        kCTFontFamilyNameAttribute, CTFontDescriptor, CTFontDescriptorCopyAttribute,
+        CTFontDescriptor, CTFontDescriptorCopyAttribute, kCTFontFamilyNameAttribute,
     };
 
     pub fn family_name(descriptor: &CTFontDescriptor) -> Option<String> {

@@ -1,7 +1,7 @@
 use super::{CameraDevice, ImagePickerOptions, ImageSource, PickedFile};
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{class, msg_send, sel};
-use std::sync::{mpsc, Mutex, Once};
+use std::sync::{Mutex, Once, mpsc};
 
 #[link(name = "PhotosUI", kind = "framework")]
 extern "C" {}

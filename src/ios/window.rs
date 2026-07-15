@@ -10,16 +10,16 @@
 //! whose view hosts a CAMetalLayer. Rendering is performed by
 //! `gpui_wgpu::WgpuRenderer` which drives wgpu over the Metal backend.
 
+use super::IosDisplay;
 use super::a11y::{A11yState, IosActionHandler, SendSubclassingAdapter, WindowActivationHandler};
 use super::events::*;
-use super::IosDisplay;
 use crate::momentum::{MomentumScroller, VelocityTracker};
 use gpui::{
-    point, px, size, AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTile,
-    Bounds, Capslock, DevicePixels, DispatchEventResult, GpuSpecs, Modifiers, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, Scene, Size, TileId, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams,
+    AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTile, Bounds, Capslock,
+    DevicePixels, DispatchEventResult, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel,
+    RequestFrameOptions, Scene, Size, TileId, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowParams, point, px, size,
 };
 use gpui_wgpu::{GpuContext, WgpuContext, WgpuRenderer, WgpuSurfaceConfig};
 use objc2::encode::{Encode, Encoding, RefEncode};
@@ -130,11 +130,9 @@ fn register_view_controller_class() -> &'static AnyClass {
                     for &window_ptr in windows.iter() {
                         if !window_ptr.is_null() {
                             let window = &*window_ptr;
-                            let _ = std::panic::catch_unwind(
-                                std::panic::AssertUnwindSafe(|| {
-                                    window.handle_layout_change();
-                                }),
-                            );
+                            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                window.handle_layout_change();
+                            }));
                         }
                     }
                 }
@@ -243,11 +241,7 @@ fn register_metal_view_class() -> &'static AnyClass {
         // UIPinchGestureRecognizer action target. The recognizer fires this
         // selector on its target on every state transition (Began / Changed /
         // Ended / Cancelled); the recognizer itself is passed as the sender.
-        extern "C" fn handle_pinch(
-            this: *mut AnyObject,
-            _sel: Sel,
-            recognizer: *mut AnyObject,
-        ) {
+        extern "C" fn handle_pinch(this: *mut AnyObject, _sel: Sel, recognizer: *mut AnyObject) {
             handle_pinch_recognizer(this, recognizer);
         }
 
@@ -256,11 +250,7 @@ fn register_metal_view_class() -> &'static AnyClass {
         // recognizer as sender. Pushes a delta onto the rotation
         // side-channel queue (see `rotation` module) rather than
         // emitting a PlatformInput (gpui core has no rotation event).
-        extern "C" fn handle_rotation(
-            this: *mut AnyObject,
-            _sel: Sel,
-            recognizer: *mut AnyObject,
-        ) {
+        extern "C" fn handle_rotation(this: *mut AnyObject, _sel: Sel, recognizer: *mut AnyObject) {
             handle_rotation_recognizer(this, recognizer);
         }
 
@@ -790,8 +780,8 @@ impl IosWindow {
             // `[UIWindow alloc] initWithFrame:`. From this point on the
             // window outlives `IosWindow::new`'s autorelease pool —
             // see the field's docstring for why this matters.
-            let window = Retained::from_raw(window)
-                .expect("[UIWindow alloc] initWithFrame: returned null");
+            let window =
+                Retained::from_raw(window).expect("[UIWindow alloc] initWithFrame: returned null");
 
             // Explicitly retain `view_controller`, `view`, and
             // `text_input_view` so they don't dangle when the surrounding
@@ -1266,8 +1256,7 @@ impl IosWindow {
         //   3 = Ended, 4 = Cancelled, 5 = Failed
         let state: i64 = unsafe { msg_send![recognizer, state] };
         let scale: f64 = unsafe { msg_send![recognizer, scale] };
-        let location: ObjcCGPoint =
-            unsafe { msg_send![recognizer, locationInView: self.view] };
+        let location: ObjcCGPoint = unsafe { msg_send![recognizer, locationInView: self.view] };
 
         let (phase, delta) = match state {
             1 => (gpui::TouchPhase::Started, (scale - 1.0) as f32),
@@ -1280,10 +1269,7 @@ impl IosWindow {
         // measured from 1.0 — this gives us per-event deltas naturally.
         let _: () = unsafe { msg_send![recognizer, setScale: 1.0_f64] };
 
-        let position = gpui::point(
-            gpui::px(location.x as f32),
-            gpui::px(location.y as f32),
-        );
+        let position = gpui::point(gpui::px(location.x as f32), gpui::px(location.y as f32));
 
         if let Some(callback) = self.input_callback.borrow_mut().as_mut() {
             callback(PlatformInput::Pinch(gpui::PinchEvent {
@@ -1309,8 +1295,7 @@ impl IosWindow {
         //   3 = Ended, 4 = Cancelled, 5 = Failed
         let state: i64 = unsafe { msg_send![recognizer, state] };
         let rotation: f64 = unsafe { msg_send![recognizer, rotation] };
-        let location: ObjcCGPoint =
-            unsafe { msg_send![recognizer, locationInView: self.view] };
+        let location: ObjcCGPoint = unsafe { msg_send![recognizer, locationInView: self.view] };
 
         let (phase, delta) = match state {
             1 => (gpui::TouchPhase::Started, rotation as f32),
@@ -1837,27 +1822,29 @@ impl PlatformWindow for IosWindow {
             .map(|v| !v.is_empty() && v != "0")
             .unwrap_or(false);
         let mut last_logged_len = usize::MAX;
-        Some(Box::new(move |drain: gpui::accessibility::AccessibilityDrain| {
-            let gpui::accessibility::AccessibilityDrain {
-                tree_update,
-                focus_inverse_map,
-            } = drain;
-            {
-                let mut a11y = state.lock();
-                a11y.absorb_drain(&tree_update);
-                if snapshot_log {
-                    // Log only on change: hosts assert pruning (no
-                    // ghost nodes from dead screens) from run logs.
-                    let len = a11y.snapshot_len();
-                    if len != last_logged_len {
-                        last_logged_len = len;
-                        eprintln!("[a11y-snapshot] reachable_nodes={len}");
+        Some(Box::new(
+            move |drain: gpui::accessibility::AccessibilityDrain| {
+                let gpui::accessibility::AccessibilityDrain {
+                    tree_update,
+                    focus_inverse_map,
+                } = drain;
+                {
+                    let mut a11y = state.lock();
+                    a11y.absorb_drain(&tree_update);
+                    if snapshot_log {
+                        // Log only on change: hosts assert pruning (no
+                        // ghost nodes from dead screens) from run logs.
+                        let len = a11y.snapshot_len();
+                        if len != last_logged_len {
+                            last_logged_len = len;
+                            eprintln!("[a11y-snapshot] reachable_nodes={len}");
+                        }
                     }
+                    a11y.focus_inverse_map = focus_inverse_map;
                 }
-                a11y.focus_inverse_map = focus_inverse_map;
-            }
-            adapter.lock().update_if_active(|| tree_update);
-        }))
+                adapter.lock().update_if_active(|| tree_update);
+            },
+        ))
     }
 
     fn take_pending_a11y_actions(&mut self) -> Vec<gpui::accessibility::PendingA11yAction> {

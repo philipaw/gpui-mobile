@@ -32,7 +32,7 @@
 //! For showcase / demo purposes, [`navigation_bar_demo`] renders a
 //! static (non-interactive) bar with four hardcoded items.
 
-use gpui::{div, prelude::*, px, rgb, AnyElement, MouseButton, MouseDownEvent, Window};
+use gpui::{AnyElement, MouseButton, MouseDownEvent, Window, div, prelude::*, px, rgb};
 
 // ── Navigation item descriptor ───────────────────────────────────────────────
 

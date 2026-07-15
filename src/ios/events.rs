@@ -6,7 +6,7 @@
 //! - Pan gesture → ScrollWheel events
 //! - Touch move → MouseMove events
 
-use gpui::{px, Pixels, Point, TouchPhase};
+use gpui::{Pixels, Point, TouchPhase, px};
 use objc2::msg_send;
 use objc2::runtime::AnyObject;
 

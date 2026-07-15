@@ -46,7 +46,7 @@
 //!     }));
 //! ```
 
-use gpui::{div, prelude::*, px, rgb, AnyElement, MouseButton, MouseDownEvent, Stateful, Window};
+use gpui::{AnyElement, MouseButton, MouseDownEvent, Stateful, Window, div, prelude::*, px, rgb};
 
 use super::theme::{MaterialTheme, ShapeScale};
 

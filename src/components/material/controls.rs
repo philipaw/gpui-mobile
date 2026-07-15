@@ -59,9 +59,9 @@
 //!     .label("Price range");
 //! ```
 
-use gpui::{div, prelude::*, px, rgb, Hsla, MouseButton, MouseDownEvent, Window};
+use gpui::{Hsla, MouseButton, MouseDownEvent, Window, div, prelude::*, px, rgb};
 
-use super::theme::{color, MaterialTheme, TRANSPARENT};
+use super::theme::{MaterialTheme, TRANSPARENT, color};
 
 // ── Click handler alias ──────────────────────────────────────────────────────
 

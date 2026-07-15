@@ -4,7 +4,7 @@
 //! and possibly an external display via AirPlay or USB-C.
 
 use anyhow::Result;
-use gpui::{px, size, Bounds, DisplayId, Pixels, PlatformDisplay};
+use gpui::{Bounds, DisplayId, Pixels, PlatformDisplay, px, size};
 use objc2::{class, msg_send};
 
 use super::cg_types::ObjcCGRect;
