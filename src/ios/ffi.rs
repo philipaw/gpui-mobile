@@ -302,6 +302,21 @@ pub extern "C" fn gpui_ios_set_display_link_target(target_timestamp: f64) {
         .store(target_timestamp.to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// gem D4 native tuning panel — set one glass-composite param
+/// (idx 0..15, GlassTuning order) from a `UISlider`'s valueChanged;
+/// applied to the live renderer next frame.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_set_glass_tuning_param(idx: u32, value: f32) {
+    crate::set_glass_tuning_param(idx as usize, value);
+}
+
+/// gem D4 native tuning panel — dump the current 15 params (the panel's
+/// "log" button) so the dialed set can be baked into the shader consts.
+#[unsafe(no_mangle)]
+pub extern "C" fn gpui_ios_log_glass_tuning() {
+    eprintln!("[glass-tune] {:?}", crate::glass_tuning_snapshot());
+}
+
 fn request_frame_inner(window_ptr: *mut c_void) {
     if window_ptr.is_null() {
         return;

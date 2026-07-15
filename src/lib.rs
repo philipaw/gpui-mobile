@@ -344,6 +344,49 @@ pub(crate) fn glass_desired() -> Option<bool> {
     }
 }
 
+/// Live glass-composite tuning: 15 params stored as `f32` bits, plus a
+/// "set" flag. Same live-push precedent as `GLASS_DESIRED` — applied to
+/// the `WgpuRenderer` on every `draw`, so it survives renderer
+/// recreation and device recovery.
+static GLASS_TUNING_SET: AtomicBool = AtomicBool::new(false);
+static GLASS_TUNING_BITS: [AtomicU32; 15] = [const { AtomicU32::new(0) }; 15];
+
+/// Push 15 live glass-composite tuning params (see GlassTuning order)
+/// from the app's debug panel; applied to the live renderer every draw.
+pub fn set_glass_tuning(vals: [f32; 15]) {
+    for (i, v) in vals.iter().enumerate() {
+        GLASS_TUNING_BITS[i].store(v.to_bits(), Ordering::Release);
+    }
+    GLASS_TUNING_SET.store(true, Ordering::Release);
+}
+
+/// Update a single glass-tuning param (idx 0..15) — the native debug
+/// slider panel's per-slider path (main.m → `gpui_ios_set_glass_tuning_param`).
+pub fn set_glass_tuning_param(idx: usize, value: f32) {
+    if idx < GLASS_TUNING_BITS.len() {
+        GLASS_TUNING_BITS[idx].store(value.to_bits(), Ordering::Release);
+        GLASS_TUNING_SET.store(true, Ordering::Release);
+    }
+}
+
+/// Snapshot the 15 params (defaults to zeros until first push) — for
+/// the native panel's `log` dump.
+pub fn glass_tuning_snapshot() -> [f32; 15] {
+    glass_tuning().unwrap_or([0.0; 15])
+}
+
+/// The pushed glass tuning, if the app has ever pushed one.
+pub(crate) fn glass_tuning() -> Option<[f32; 15]> {
+    if !GLASS_TUNING_SET.load(Ordering::Acquire) {
+        return None;
+    }
+    let mut out = [0.0f32; 15];
+    for i in 0..15 {
+        out[i] = f32::from_bits(GLASS_TUNING_BITS[i].load(Ordering::Acquire));
+    }
+    Some(out)
+}
+
 // ── Safe area insets ─────────────────────────────────────────────────────────
 
 /// Query the safe area insets from the platform.

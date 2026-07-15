@@ -2025,6 +2025,9 @@ impl PlatformWindow for IosWindow {
             if let Some(enabled) = crate::glass_desired() {
                 renderer.set_glass_enabled(enabled);
             }
+            if let Some(t) = crate::glass_tuning() {
+                renderer.set_glass_tuning(t);
+            }
             renderer.draw(scene);
         } else {
             log::trace!("GPUI iOS: draw called but no renderer available");
