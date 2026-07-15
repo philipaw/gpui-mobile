@@ -7,6 +7,7 @@
 
 use crate::platform_view::{
     PlatformView, PlatformViewBounds, PlatformViewFactory, PlatformViewId, PlatformViewParams,
+    PlatformViewTier,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -414,8 +415,12 @@ impl IosPlatformView {
     /// platform view element's first paint. Subsequent calls are no-ops.
     /// Renamed from `insert_into_window` so the trait method on
     /// `PlatformView` can call this without shadowing or recursing.
+    ///
+    /// `tier` picks the side of the Metal layer to composite on and is
+    /// bound by the first successful insertion — the guard below makes
+    /// every later call a no-op, so a view cannot change tiers.
     #[cfg(target_os = "ios")]
-    fn do_insert_into_window(&self) -> Result<(), String> {
+    fn do_insert_into_window(&self, tier: PlatformViewTier) -> Result<(), String> {
         // Guard against double-insertion.
         if self.inserted.swap(true, Ordering::Relaxed) {
             return Ok(());
@@ -450,14 +455,36 @@ impl IosPlatformView {
                         if !metal_view.is_null() {
                             let parent: *mut AnyObject = msg_send![metal_view, superview];
                             if !parent.is_null() {
-                                let _: () = msg_send![
-                                    parent,
-                                    insertSubview: native_view,
-                                    belowSubview: metal_view
-                                ];
+                                // Same parent (the UIWindow) either way;
+                                // only the sibling relationship to the
+                                // Metal view differs. `aboveSubview:` is
+                                // what makes a real system blur possible
+                                // — a UIVisualEffectView must be ABOVE
+                                // the Metal layer to have live pixels to
+                                // sample.
+                                match tier {
+                                    PlatformViewTier::Underlay => {
+                                        let _: () = msg_send![
+                                            parent,
+                                            insertSubview: native_view,
+                                            belowSubview: metal_view
+                                        ];
+                                    }
+                                    PlatformViewTier::Overlay => {
+                                        let _: () = msg_send![
+                                            parent,
+                                            insertSubview: native_view,
+                                            aboveSubview: metal_view
+                                        ];
+                                    }
+                                }
                                 log::info!(
-                                    "IosPlatformView: inserted view {} below Metal view",
-                                    self.id
+                                    "IosPlatformView: inserted view {} {} Metal view",
+                                    self.id,
+                                    match tier {
+                                        PlatformViewTier::Underlay => "below",
+                                        PlatformViewTier::Overlay => "above",
+                                    }
                                 );
                                 // Verdict-side dump: walk
                                 // `[parent subviews]` (the UIWindow)
@@ -676,15 +703,20 @@ impl PlatformView for IosPlatformView {
     }
 
     fn insert_into_window(&self) -> Result<(), String> {
+        self.insert_into_window_at(PlatformViewTier::Underlay)
+    }
+
+    fn insert_into_window_at(&self, tier: PlatformViewTier) -> Result<(), String> {
         if self.disposed.load(Ordering::Relaxed) {
             return Err("View is disposed".into());
         }
         #[cfg(target_os = "ios")]
         {
-            return self.do_insert_into_window();
+            return self.do_insert_into_window(tier);
         }
         #[cfg(not(target_os = "ios"))]
         {
+            let _ = tier;
             Ok(())
         }
     }
